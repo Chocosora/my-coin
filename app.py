@@ -6,142 +6,121 @@ import plotly.graph_objects as go
 import time
 from datetime import datetime, timedelta
 
-# 1. 페이지 설정
-st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP AI 트레이딩 전략 (Pro)")
+# ---------------------------------------------------------
+# 1. 기본 설정
+# ---------------------------------------------------------
+st.set_page_config(page_title="XRP Pro AI", layout="wide")
+st.title("🤖 XRP AI 트레이딩 (최종수정판)")
 
-# 2. 시간 설정
-st.write("⏱️ **단타 차트 기준**")
-timeframe = st.radio("시간 기준", ["3m", "5m", "15m", "30m"], index=1, horizontal=True, label_visibility="collapsed")
+st.write("⏱️ **단타 시간 기준**")
+timeframe = st.radio("Timeframe", ["3m", "5m", "15m", "30m"], index=1, horizontal=True, label_visibility="collapsed")
 
 exchange = ccxt.upbit()
 
-def get_data_safe():
-    # 데이터 수집 (넉넉하게 200개)
+# ---------------------------------------------------------
+# 2. 데이터 가져오기 (에러 원천 차단)
+# ---------------------------------------------------------
+def get_market_data():
+    # (1) 캔들 데이터 가져오기
     ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
     
-    # --- [보조지표 계산] ---
-    # 1. RSI
+    # (2) 보조지표 계산 (여기가 핵심 수정!)
+    # RSI
     df['rsi'] = ta.rsi(df['close'], length=14)
     
-    # 2. 볼린저 밴드 (핵심 수정: 이름으로 안 찾고 순서로 찾음)
+    # 볼린저 밴드: 이름을 믿지 않고 '순서'로 강제 할당
     bb = ta.bbands(df['close'], length=20, std=2)
+    # pandas_ta는 무조건 [하단, 중단, 상단, ...] 순서로 결과를 줍니다.
+    df['bb_lower'] = bb.iloc[:, 0] # 첫번째 칸: 하단
+    df['bb_mid']   = bb.iloc[:, 1] # 두번째 칸: 중단
+    df['bb_upper'] = bb.iloc[:, 2] # 세번째 칸: 상단
     
-    # bb 변수 안에는 [하단, 중단, 상단, 대역폭, 퍼센트] 순서로 들어있음
-    # 이름을 몰라도 순서대로 가져오면 에러가 안 남
-    df['bb_lower'] = bb.iloc[:, 0] # 0번: 하단
-    df['bb_mid'] = bb.iloc[:, 1]   # 1번: 중단
-    df['bb_upper'] = bb.iloc[:, 2] # 2번: 상단
-    
-    # 3. MACD
+    # MACD
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    df['macd_hist'] = macd.iloc[:, 1] # 1번: 히스토그램
+    df['macd_hist'] = macd.iloc[:, 1] # 두번째 칸: 히스토그램
     
-    # 4. MFI
+    # MFI
     df['mfi'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=14)
     
-    # 호가창 데이터
+    # (3) 호가창 데이터
     orderbook = exchange.fetch_order_book("XRP/KRW")
     
     return df, orderbook
 
+# ---------------------------------------------------------
+# 3. 화면 표시 (무한 반복)
+# ---------------------------------------------------------
 placeholder = st.empty()
 
 while True:
     try:
-        df, orderbook = get_data_safe()
+        df, orderbook = get_market_data()
         
-        # 최신 데이터 (마지막 줄)
-        curr = df.iloc[-1]
-        last = df.iloc[-2] # 직전 확정 봉
+        # 최신 데이터 추출
+        curr = df.iloc[-1]   # 현재 진행중인 봉
+        last = df.iloc[-2]   # 직전 확정된 봉 (지표용)
         
+        # 숫자값 안전하게 변환 (float)
         curr_price = float(curr['close'])
-        
-        # 지표 값들 (안전하게 float 변환)
         rsi = float(last['rsi']) if pd.notnull(last['rsi']) else 50.0
         mfi = float(last['mfi']) if pd.notnull(last['mfi']) else 50.0
-        macd_hist = float(last['macd_hist']) if pd.notnull(last['macd_hist']) else 0.0
+        macd_val = float(last['macd_hist']) if pd.notnull(last['macd_hist']) else 0.0
         
-        # 볼린저 밴드 값
-        bb_upper = float(curr['bb_upper'])
-        bb_mid = float(curr['bb_mid'])
-        bb_lower = float(curr['bb_lower'])
+        # 추천가 계산
+        buy_price  = float(curr['bb_lower'])
+        sell_target = float(curr['bb_mid'])
+        sell_max    = float(curr['bb_upper'])
+        stop_loss   = buy_price * 0.985
         
         # 호가창 비율
-        total_bid = sum([x[1] for x in orderbook['bids']])
-        total_ask = sum([x[1] for x in orderbook['asks']])
-        if total_ask > 0:
-            bid_ask_ratio = (total_bid / total_ask) * 100
-        else:
-            bid_ask_ratio = 100.0
+        bids = sum([x[1] for x in orderbook['bids']])
+        asks = sum([x[1] for x in orderbook['asks']])
+        ratio = (bids / asks * 100) if asks > 0 else 100
         
-        now_time = (datetime.now() + timedelta(hours=9)).strftime("%H:%M:%S")
+        now = (datetime.now() + timedelta(hours=9)).strftime("%H:%M:%S")
 
         with placeholder.container():
-            # --- [섹션 1] AI 매매 전략 리포트 ---
-            st.header(f"🎯 AI 추천 가격 ({now_time})")
+            # [A] AI 추천 전략 리포트 (가장 먼저 보여줌)
+            st.markdown(f"### 🎯 AI 트레이딩 전략 ({now})")
             
-            # 전략 계산
-            buy_price = bb_lower # 매수 추천가 (하단)
-            sell_price_1 = bb_mid # 1차 목표가 (중단)
-            sell_price_2 = bb_upper # 2차 목표가 (상단)
-            stop_loss = buy_price * 0.985 # 손절가 (-1.5%)
-            
-            # 현재 포지션 추천 로직
-            if rsi < 35 and curr_price <= bb_lower * 1.01:
-                recommendation = "🔥 강력 매수 구간 (저점 도달)"
-                st.error(f"### 결론: {recommendation}")
+            # 매수/매도 판단
+            if rsi < 35 and curr_price <= buy_price * 1.01:
+                st.error(f"🔥 **[진입 찬스]** RSI {rsi:.0f} + 하단 터치! 매수 추천")
             elif rsi > 70:
-                recommendation = "❄️ 매도 권장 (과열)"
-                st.info(f"### 결론: {recommendation}")
+                st.info(f"❄️ **[매도 경고]** 과열 상태입니다. 익절하세요.")
             else:
-                recommendation = "👀 관망 (기다리세요)"
-                st.success(f"### 결론: {recommendation}")
-            
-            # 가격표 (숫자가 꼭 뜨도록 처리)
+                st.success(f"👀 **[관망 중]** 더 좋은 자리를 기다립니다.")
+
+            # 가격표 4개 (여기가 안 뜨던 부분)
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("1. 진입 추천가", f"{buy_price:,.0f} 원", "이 가격 오면 매수")
-            c2.metric("2. 1차 목표가", f"{sell_price_1:,.0f} 원", "50% 익절 구간")
-            c3.metric("3. 2차 목표가", f"{sell_price_2:,.0f} 원", "전량 익절 구간")
-            c4.metric("🚨 손절가(필수)", f"{stop_loss:,.0f} 원", "깨지면 도망")
+            c1.metric("1. 진입 추천가", f"{buy_price:,.0f} 원", "Wait")
+            c2.metric("2. 1차 목표가", f"{sell_target:,.0f} 원", "50% Sell")
+            c3.metric("3. 2차 목표가", f"{sell_max:,.0f} 원", "All Sell")
+            c4.metric("🚨 손절가", f"{stop_loss:,.0f} 원", "Stop")
             
             st.divider()
 
-            # --- [섹션 2] 전문가 지표 ---
+            # [B] 시장 데이터 분석
             col1, col2, col3 = st.columns(3)
-            
-            # MACD
-            macd_msg = "상승 힘 쎔 📈" if macd_hist > 0 else "하락 힘 쎔 📉"
-            col1.metric("MACD 추세", macd_msg, f"{macd_hist:.2f}")
-            
-            # MFI
-            mfi_msg = "세력 매집중 💰" if mfi < 20 else "세력 이탈중 💸" if mfi > 80 else "눈치보기"
-            col2.metric("MFI (돈의 흐름)", f"{mfi:.1f}", mfi_msg)
-            
-            # 호가창
-            order_msg = "매수벽 두꺼움 🛡️" if bid_ask_ratio > 100 else "매도벽 두꺼움 ⚔️"
-            col3.metric("호가창 파워", f"{bid_ask_ratio:.0f} %", order_msg)
+            col1.metric("현재가", f"{curr_price:,.0f} 원")
+            col2.metric("매수벽 강도", f"{ratio:.0f} %", "100↑ 매수우위")
+            col3.metric("MACD 추세", f"{macd_val:.2f}", "양수=상승 / 음수=하락")
 
-            # --- [섹션 3] 차트 ---
+            # [C] 차트
             fig = go.Figure()
-            # 캔들
-            fig.add_trace(go.Candlestick(x=df['timestamp'],
-                            open=df['open'], high=df['high'],
-                            low=df['low'], close=df['close'], name='가격'))
-            # 밴드 라인
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', width=1), name='상단(2차)'))
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_mid'], line=dict(color='orange', width=1), name='중단(1차)'))
+            fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'))
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', width=1), name='상단'))
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_mid'], line=dict(color='orange', width=1), name='중단'))
             fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_lower'], line=dict(color='blue', width=2), name='하단(매수)'))
-            
-            fig.update_layout(height=400, margin=dict(l=10, r=10, t=10, b=10), title=f"{timeframe} 전략 차트")
+            fig.update_layout(height=400, margin=dict(t=30,b=10,l=10,r=10), title=f"{timeframe} 차트")
             fig.update_xaxes(rangeslider_visible=False)
             st.plotly_chart(fig, use_container_width=True)
 
         time.sleep(1)
 
     except Exception as e:
-        # 혹시라도 에러나면 정확한 이유를 화면에 띄움
-        st.error(f"오류 발생: {e}")
+        # 에러가 나면 멈추지 말고 에러 메시지만 출력하고 다시 시도
+        st.error(f"데이터 수신 중 오류: {e}")
         time.sleep(3)
