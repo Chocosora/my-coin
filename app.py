@@ -26,17 +26,18 @@ def get_data_safe():
     # 1. RSI
     df['rsi'] = ta.rsi(df['close'], length=14)
     
-    # 2. 볼린저 밴드 (이름표 오류 방지를 위해 위치로 찾기)
+    # 2. 볼린저 밴드 (핵심 수정: 이름으로 안 찾고 순서로 찾음)
     bb = ta.bbands(df['close'], length=20, std=2)
-    # bb 데이터프레임의 0번:하단, 1번:중단, 2번:상단 (pandas_ta 기본순서)
-    df['bb_lower'] = bb.iloc[:, 0] # 하단선
-    df['bb_mid'] = bb.iloc[:, 1]   # 중간선
-    df['bb_upper'] = bb.iloc[:, 2] # 상단선
+    
+    # bb 변수 안에는 [하단, 중단, 상단, 대역폭, 퍼센트] 순서로 들어있음
+    # 이름을 몰라도 순서대로 가져오면 에러가 안 남
+    df['bb_lower'] = bb.iloc[:, 0] # 0번: 하단
+    df['bb_mid'] = bb.iloc[:, 1]   # 1번: 중단
+    df['bb_upper'] = bb.iloc[:, 2] # 2번: 상단
     
     # 3. MACD
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    # macd 데이터프레임의 0번:MACD, 1번:Histogram, 2번:Signal
-    df['macd_hist'] = macd.iloc[:, 1]
+    df['macd_hist'] = macd.iloc[:, 1] # 1번: 히스토그램
     
     # 4. MFI
     df['mfi'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=14)
@@ -63,7 +64,7 @@ while True:
         mfi = float(last['mfi']) if pd.notnull(last['mfi']) else 50.0
         macd_hist = float(last['macd_hist']) if pd.notnull(last['macd_hist']) else 0.0
         
-        # 볼린저 밴드 값 (현재 봉 기준)
+        # 볼린저 밴드 값
         bb_upper = float(curr['bb_upper'])
         bb_mid = float(curr['bb_mid'])
         bb_lower = float(curr['bb_lower'])
@@ -74,7 +75,7 @@ while True:
         if total_ask > 0:
             bid_ask_ratio = (total_bid / total_ask) * 100
         else:
-            bid_ask_ratio = 100.0 # 에러 방지용 기본값
+            bid_ask_ratio = 100.0
         
         now_time = (datetime.now() + timedelta(hours=9)).strftime("%H:%M:%S")
 
@@ -91,15 +92,12 @@ while True:
             # 현재 포지션 추천 로직
             if rsi < 35 and curr_price <= bb_lower * 1.01:
                 recommendation = "🔥 강력 매수 구간 (저점 도달)"
-                box_color = "red"
                 st.error(f"### 결론: {recommendation}")
             elif rsi > 70:
                 recommendation = "❄️ 매도 권장 (과열)"
-                box_color = "blue"
                 st.info(f"### 결론: {recommendation}")
             else:
                 recommendation = "👀 관망 (기다리세요)"
-                box_color = "gray"
                 st.success(f"### 결론: {recommendation}")
             
             # 가격표 (숫자가 꼭 뜨도록 처리)
@@ -144,6 +142,6 @@ while True:
         time.sleep(1)
 
     except Exception as e:
-        # 여기가 핵심입니다. 에러가 나면 왜 났는지 빨간 글씨로 알려줍니다.
+        # 혹시라도 에러나면 정확한 이유를 화면에 띄움
         st.error(f"오류 발생: {e}")
         time.sleep(3)
