@@ -6,20 +6,17 @@ import plotly.graph_objects as go
 import time
 from datetime import datetime
 
-# 페이지 기본 설정 (모바일 최적화)
+# 페이지 설정
 st.set_page_config(page_title="XRP 단타 감시", layout="wide")
 
-# 사이드바 (설정)
+# 사이드바
 with st.sidebar:
     st.header("설정 메뉴")
     coin = st.text_input("코인 티커", "XRP/KRW")
-    timeframe = st.selectbox("시간 기준", ["1m", "3m", "5m", "15m", "30m"], index=2) # 기본 5분
-    st.info("💡 핸드폰과 컴퓨터가 같은 와이파이에 있어야 접속됩니다.")
+    timeframe = st.selectbox("시간 기준", ["1m", "3m", "5m", "15m", "30m"], index=2)
 
-# 메인 타이틀
 st.title(f"🚀 {coin} 실시간 AI 감시중")
 
-# 데이터 가져오는 함수
 def fetch_data():
     exchange = ccxt.upbit()
     ohlcv = exchange.fetch_ohlcv(coin, timeframe, limit=100)
@@ -28,66 +25,67 @@ def fetch_data():
     
     # 지표 계산
     df['rsi'] = ta.rsi(df['close'], length=14)
+    
+    # 볼린저 밴드 계산 및 이름 강제 변경 (에러 방지 핵심!)
     bb = ta.bbands(df['close'], length=20, std=2)
+    # 컬럼 이름을 우리가 아는 쉬운 영어로 강제로 바꿉니다.
+    # 순서: 하단(Lower), 중단(Mid), 상단(Upper), 대역폭, 퍼센트
+    bb.columns = ['bb_lower', 'bb_mid', 'bb_upper', 'bb_width', 'bb_percent']
+    
     df = pd.concat([df, bb], axis=1)
     return df
 
-# 실시간 갱신을 위한 빈 공간 생성
 placeholder = st.empty()
 
-# 무한 반복 실행
 while True:
     try:
         df = fetch_data()
         
-        # 가장 최근 확정된 봉 (직전 캔들)
-        last = df.iloc[-2]
-        # 현재 진행 중인 봉 (실시간)
-        curr = df.iloc[-1]
+        last = df.iloc[-2] # 확정된 봉
+        curr = df.iloc[-1] # 현재 봉
         
         curr_price = curr['close']
         rsi = last['rsi']
-        bb_upper = last['BBU_20_2.0']
-        bb_lower = last['BBL_20_2.0']
         
-        # 현재 시간
+        # 수정된 쉬운 이름 사용
+        bb_upper = last['bb_upper']
+        bb_lower = last['bb_lower']
+        
         now_time = datetime.now().strftime("%H:%M:%S")
 
         with placeholder.container():
-            # 1. 상태 표시 (가장 중요)
+            # 상태 표시
             status = "👀 관망 (지켜보는 중)"
-            bg_color = "#f0f2f6" # 회색
             
             if rsi < 30 and curr_price <= bb_lower:
                 status = "🔥 강력 매수 (과매도+하단)"
-                st.error(f"[{now_time}] {status}") # 빨간 박스
+                st.error(f"[{now_time}] {status}")
             elif rsi > 70 and curr_price >= bb_upper:
                 status = "❄️ 강력 매도 (과매수+상단)"
-                st.info(f"[{now_time}] {status}") # 파란 박스
+                st.info(f"[{now_time}] {status}")
             else:
-                st.success(f"[{now_time}] {status}") # 초록 박스
+                st.success(f"[{now_time}] {status}")
 
-            # 2. 핵심 지표 (큰 글씨)
+            # 지표 표시
             c1, c2, c3 = st.columns(3)
             c1.metric("현재 가격", f"{curr_price:,.0f} 원")
-            c2.metric("RSI 강도", f"{rsi:.1f}", delta="30이하 매수 / 70이상 매도")
-            c3.metric("볼린저 하단", f"{bb_lower:,.0f} 원", delta="이 가격 밑이면 저렴")
+            c2.metric("RSI 강도", f"{rsi:.1f}")
+            c3.metric("볼린저 하단", f"{bb_lower:,.0f} 원")
 
-            # 3. 차트 그리기 (모바일에서도 줌인/줌아웃 가능)
+            # 차트
             fig = go.Figure()
-            # 캔들
             fig.add_trace(go.Candlestick(x=df['timestamp'],
                             open=df['open'], high=df['high'],
                             low=df['low'], close=df['close'], name='Price'))
-            # 볼린저밴드
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['BBU_20_2.0'], line=dict(color='gray', width=1), name='상단'))
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['BBL_20_2.0'], line=dict(color='blue', width=2), name='하단(매수선)'))
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', width=1), name='상단'))
+            fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_lower'], line=dict(color='blue', width=2), name='하단'))
             
             fig.update_layout(height=400, margin=dict(l=10, r=10, t=30, b=10), title=f"{timeframe} 차트")
             st.plotly_chart(fig, use_container_width=True)
 
-        time.sleep(1) # 1초마다 갱신
+        time.sleep(1)
 
     except Exception as e:
-        st.write("데이터 수신 중 잠시 대기...", e)
+        # 에러가 나면 화면에 보여줍니다 (디버깅용)
+        st.write("데이터 수신 중...", e)
         time.sleep(3)
