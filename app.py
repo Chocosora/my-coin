@@ -8,158 +8,202 @@ from datetime import datetime, timedelta
 import google.generativeai as genai
 
 # ---------------------------------------------------------
-# [설정] 구글 제미나이 API 키 입력
+# [설정] 구글 API 키 (제공해주신 키 적용)
 # ---------------------------------------------------------
-# 여기에 아까 받으신 AIza... 키를 따옴표 안에 넣어주세요
-API_KEY = "AIzaSyDecZIT6V6rO5pIwRcpeC_juEZ_E5CAnkQ" 
+API_KEY = "AIzaSyDecZIT6V6rO5pIwRcpeC_juEZ_E5CAnkQ"
 genai.configure(api_key=API_KEY)
 
 # 페이지 설정
-st.set_page_config(page_title="XRP AI Analyst", layout="wide")
-st.title("🤖 XRP AI 트레이딩 (Gemini Pro)")
+st.set_page_config(page_title="XRP All-in-One", layout="wide")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 6.0)")
 
-# 세션 상태 초기화 (리포트 저장용)
-if 'ai_report' not in st.session_state:
-    st.session_state['ai_report'] = None
-if 'report_time' not in st.session_state:
-    st.session_state['report_time'] = None
+# 세션 상태 초기화
+if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
+if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 
-# 사이드바 설정
+# 사이드바
 st.sidebar.header("설정")
-timeframe = st.sidebar.radio("시간 기준", ["3m", "5m", "15m", "30m"], index=1)
-auto_refresh = st.sidebar.checkbox("실시간 데이터 자동갱신", value=True)
+timeframe = st.sidebar.radio("단타 시간 기준", ["3m", "5m", "15m", "30m"], index=1)
+auto_refresh = st.sidebar.checkbox("실시간 자동갱신", value=True)
 
 exchange = ccxt.upbit()
 
 # ---------------------------------------------------------
-# 함수 1: 데이터 수집 (수학적 계산)
+# 함수 1: 데이터 수집 (단타용 + 장기추세용 + 지표계산)
 # ---------------------------------------------------------
-def get_market_data():
-    ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=100)
+def get_all_data():
+    # 1. 단타용 데이터 (선택한 분봉)
+    ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
     
-    # 지표 계산
+    # 지표: RSI
     df['rsi'] = ta.rsi(df['close'], length=14)
     
+    # 지표: 볼린저 밴드 (순서로 찾기)
     bb = ta.bbands(df['close'], length=20, std=2)
-    # 위치로 안전하게 가져오기 (에러 방지)
     df['bb_lower'] = bb.iloc[:, 0]
     df['bb_mid'] = bb.iloc[:, 1]
     df['bb_upper'] = bb.iloc[:, 2]
     
+    # 지표: MACD
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     df['macd_hist'] = macd.iloc[:, 1]
     
+    # 2. 장기 추세용 데이터 (1시간봉 고정)
+    ohlcv_trend = exchange.fetch_ohlcv("XRP/KRW", "1h", limit=30)
+    df_trend = pd.DataFrame(ohlcv_trend, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    
+    # 3. 호가창
     orderbook = exchange.fetch_order_book("XRP/KRW")
     
-    return df, orderbook
+    return df, df_trend, orderbook
 
 # ---------------------------------------------------------
-# 함수 2: AI 객관적 분석 요청 (Gemini)
+# 함수 2: Gemini AI 분석 (모델명 수정됨!)
 # ---------------------------------------------------------
-def generate_ai_report(df, orderbook):
+def ask_gemini(df, trends, ratio):
     try:
         curr = df.iloc[-1]
         last = df.iloc[-2]
         
-        # 호가창 비율 계산
-        bids = sum([x[1] for x in orderbook['bids']])
-        asks = sum([x[1] for x in orderbook['asks']])
-        ratio = (bids / asks * 100) if asks > 0 else 0
-        
-        # 프롬프트 작성
         prompt = f"""
-        당신은 냉철한 금융 시장 분석가입니다. 아래 XRP(리플) 데이터를 바탕으로 투자자를 위한 '객관적인 시장 평가 리포트'를 작성하세요.
+        당신은 암호화폐 전문 트레이더입니다. 아래 XRP 데이터를 보고 매매 전략을 세워주세요.
         
-        [시장 데이터]
-        - 현재가: {curr['close']}원
-        - RSI(14): {last['rsi']:.1f} (기준: 30이하 과매도, 70이상 과매수)
-        - 볼린저밴드: 하단({curr['bb_lower']:.0f}) ~ 상단({curr['bb_upper']:.0f}) 사이 위치
-        - MACD 모멘텀: {last['macd_hist']:.2f} (양수면 상승세, 음수면 하락세)
-        - 매수/매도 잔량비: {ratio:.0f}% (100% 초과시 매수 우위)
-
-        [작성 양식]
-        1. 📊 **시장 심리**: (공포/중립/탐욕 중 선택 및 이유)
-        2. ⚖️ **수급 분석**: (매수세 vs 매도세 강도 평가)
-        3. 🎯 **전략 제안**: (관망/진입/익절 중 택1 + 구체적 가격대)
-        4. ⚠️ **리스크**: (현재 가장 주의할 점)
+        [추세 정보]
+        - 24시간 변동: {trends[24]:.2f}%
+        - 3시간 변동: {trends[3]:.2f}%
         
-        결론만 명확하게 한국어로 작성해 주세요.
+        [현재 지표]
+        - 가격: {curr['close']}원
+        - RSI: {last['rsi']:.1f}
+        - MACD: {last['macd_hist']:.2f} (양수=상승, 음수=하락)
+        - 매수벽 강도: {ratio:.0f}%
+        - 볼린저밴드: 하단 {curr['bb_lower']:.0f} 근처인가? (현재가 확인)
+        
+        위 정보를 바탕으로:
+        1. 현재 시장의 심리 상태 (한 줄 요약)
+        2. 구체적인 진입/청산 전략
+        3. 리스크 관리 조언
+        
+        짧고 명확하게 답변하세요.
         """
         
-        model = genai.GenerativeModel('gemini-pro')
+        # [핵심 수정] 모델 이름을 gemini-pro -> gemini-1.5-flash 로 변경 (에러 해결)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"분석 중 오류 발생: {e}"
+        return f"AI 호출 오류: {e}"
 
 # ---------------------------------------------------------
-# 메인 화면 구성
+# 메인 실행 로직
 # ---------------------------------------------------------
-
 try:
-    # 1. 데이터 로딩
-    df, orderbook = get_market_data()
+    # 데이터 로딩
+    df, df_trend, orderbook = get_all_data()
+    
+    # --- [데이터 가공] ---
     curr = df.iloc[-1]
     last = df.iloc[-2]
     curr_price = float(curr['close'])
     
-    # 호가 비율
-    bids_sum = sum([x[1] for x in orderbook['bids']])
-    asks_sum = sum([x[1] for x in orderbook['asks']])
-    ratio = (bids_sum / asks_sum * 100) if asks_sum > 0 else 100
+    # 장기 추세 계산 (24, 12, 6, 3)
+    trend_curr = df_trend['close'].iloc[-1]
+    trends = {}
+    periods = {3: -4, 6: -7, 12: -13, 24: -25}
+    for h, idx in periods.items():
+        if len(df_trend) > abs(idx):
+            past = df_trend['close'].iloc[idx]
+            trends[h] = ((trend_curr - past) / past) * 100
+        else:
+            trends[h] = 0.0
 
-    # 목표가
+    # 목표가 계산
     buy_price = float(curr['bb_lower'])
-    sell_target = float(curr['bb_mid'])
+    sell_target1 = float(curr['bb_mid'])
+    sell_target2 = float(curr['bb_upper'])
+    stop_loss = buy_price * 0.985
     
-    # --- [섹션 1] 실시간 수치 데이터 ---
-    st.markdown("### 📉 실시간 시장 데이터 (자동 갱신)")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📍현재가", f"{curr_price:,.0f} 원")
-    c2.metric("매수벽 강도", f"{ratio:.0f} %", "100↑ 우위")
-    c3.metric("RSI 지수", f"{last['rsi']:.1f}", "30↓ 과매도")
-    c4.metric("진입 추천가", f"{buy_price:,.0f} 원")
-    c5.metric("1차 목표가", f"{sell_target:,.0f} 원")
+    # 호가 비율
+    bids = sum([x[1] for x in orderbook['bids']])
+    asks = sum([x[1] for x in orderbook['asks']])
+    ratio = (bids / asks * 100) if asks > 0 else 0
+    
+    # 지표 값
+    rsi_val = last['rsi']
+    macd_val = last['macd_hist']
 
-    # 차트 그리기
+    # -----------------------------------------------------
+    # [섹션 1] 장기 추세 대시보드 (복구됨)
+    # -----------------------------------------------------
+    st.markdown("### 🗓️ 시간별 추세 분석 (Trend)")
+    t1, t2, t3, t4 = st.columns(4)
+    def color_metric(val): return "🔺" if val > 0 else "🔻"
+    
+    t1.metric("24시간 전", f"{trends[24]:.2f}%", color_metric(trends[24]))
+    t2.metric("12시간 전", f"{trends[12]:.2f}%", color_metric(trends[12]))
+    t3.metric("6시간 전", f"{trends[6]:.2f}%", color_metric(trends[6]))
+    t4.metric("3시간 전", f"{trends[3]:.2f}%", color_metric(trends[3]))
+    
+    st.divider()
+
+    # -----------------------------------------------------
+    # [섹션 2] 단타 타점 및 지표 (복구됨)
+    # -----------------------------------------------------
+    st.markdown(f"### 🎯 실시간 단타 타점 & 지표 ({datetime.now().strftime('%H:%M:%S')})")
+    
+    # 5개 컬럼: 현재가 / 진입 / 1차 / 2차 / 손절
+    k0, k1, k2, k3, k4 = st.columns(5)
+    k0.metric("📍 현재가", f"{curr_price:,.0f} 원")
+    k1.metric("1. 진입 추천", f"{buy_price:,.0f} 원", "매수 대기")
+    k2.metric("2. 1차 목표", f"{sell_target1:,.0f} 원", "50% 익절")
+    k3.metric("3. 2차 목표", f"{sell_target2:,.0f} 원", "전량 익절")
+    k4.metric("🚨 손절가", f"{stop_loss:,.0f} 원", "필수 준수")
+    
+    # 보조지표 3대장 (MACD 복구됨)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("매수벽 강도", f"{ratio:.0f} %", "100 이상 좋음")
+    m2.metric("RSI (강도)", f"{rsi_val:.1f}", "30↓ 과매도")
+    m3.metric("MACD (추세)", f"{macd_val:.2f}", "양수=상승 / 음수=하락")
+
+    # -----------------------------------------------------
+    # [섹션 3] AI 분석 (버튼식 + 모델 에러 수정)
+    # -----------------------------------------------------
+    st.divider()
+    c_btn, c_res = st.columns([1, 3])
+    
+    with c_btn:
+        st.info("🤖 **AI 정밀 분석**")
+        if st.button("Gemini 리포트 생성", type="primary"):
+            with st.spinner("AI가 분석 중입니다..."):
+                report = ask_gemini(df, trends, ratio)
+                st.session_state['ai_report'] = report
+                st.session_state['report_time'] = datetime.now().strftime("%H:%M:%S")
+                
+    with c_res:
+        if st.session_state['ai_report']:
+            st.success(f"**[분석 완료: {st.session_state['report_time']}]**")
+            st.write(st.session_state['ai_report'])
+        else:
+            st.warning("버튼을 누르면 AI 분석 결과가 여기에 표시됩니다.")
+
+    # -----------------------------------------------------
+    # [섹션 4] 차트
+    # -----------------------------------------------------
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'))
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', width=1), name='상단'))
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_mid'], line=dict(color='orange', width=1), name='중단'))
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_lower'], line=dict(color='blue', width=2), name='하단'))
-    fig.update_layout(height=350, margin=dict(t=10,b=10,l=10,r=10), title=f"{timeframe} 차트")
+    fig.update_layout(height=400, margin=dict(t=10,b=10,l=10,r=10), title=f"{timeframe} 차트")
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.divider()
-
-    # --- [섹션 2] AI 객관적 분석 리포트 ---
-    st.markdown("### 🧠 AI 객관적 분석 리포트 (On-Demand)")
-
-    col_btn, col_res = st.columns([1, 3])
-
-    with col_btn:
-        st.info("비용 절약을 위해 버튼 클릭 시에만 분석합니다.")
-        # 버튼을 누르면 AI 분석 시작
-        if st.button("📑 AI 리포트 생성", type="primary"):
-            with st.spinner("Gemini가 분석 중입니다..."):
-                report = generate_ai_report(df, orderbook)
-                st.session_state['ai_report'] = report
-                st.session_state['report_time'] = datetime.now().strftime("%H:%M:%S")
-
-    with col_res:
-        if st.session_state['ai_report']:
-            st.success(f"**분석 완료 시간: {st.session_state['report_time']}**")
-            st.markdown(st.session_state['ai_report'])
-        else:
-            st.warning("생성된 리포트가 없습니다. 버튼을 눌러주세요.")
-
 except Exception as e:
-    st.error(f"데이터 수신 중 오류가 발생했습니다: {e}")
+    st.error(f"시스템 오류 발생: {e}")
 
-# --- [자동 갱신 로직] ---
+# 자동 갱신
 if auto_refresh:
     time.sleep(1)
     st.rerun()
