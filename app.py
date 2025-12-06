@@ -8,15 +8,22 @@ from datetime import datetime, timedelta
 import google.generativeai as genai
 
 # ---------------------------------------------------------
-# [설정] 구글 API 키
+# [설정] 페이지 기본 설정
 # ---------------------------------------------------------
-# 주의: 공유해주신 키는 보안상 지웠습니다. 본인의 키를 아래 따옴표 안에 넣어주세요.
-API_KEY = "AIzaSyCSwf5C2UTymiZUb3y-HPo0O9FYYq9xsI8"
-genai.configure(api_key=API_KEY)
-
-# 페이지 설정
 st.set_page_config(page_title="XRP All-in-One", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 8.1 - 2.5 Flash Lite)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 8.2 - Cloud)")
+
+# ---------------------------------------------------------
+# [보안] 구글 API 키 로드 (Streamlit Secrets 사용)
+# ---------------------------------------------------------
+try:
+    # Streamlit Cloud의 Secrets에서 키를 가져옵니다.
+    # 로컬에서 실행 시 .streamlit/secrets.toml 파일이 필요합니다.
+    API_KEY = st.secrets["GOOGLE_API_KEY"]
+    genai.configure(api_key=API_KEY)
+except Exception as e:
+    st.error("🚨 API 키를 찾을 수 없습니다. Streamlit Cloud의 [Settings] -> [Secrets]에 'GOOGLE_API_KEY'를 등록해주세요.")
+    st.stop() # 키가 없으면 앱 실행 중단
 
 # 세션 상태 초기화
 if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
@@ -67,16 +74,13 @@ def get_all_data():
 # ---------------------------------------------------------
 def get_major_walls(orderbook):
     # 매도벽(Asks) 중 물량이 가장 많은 상위 3개
-    # x[0]: 가격, x[1]: 물량
     asks_sorted = sorted(orderbook['asks'], key=lambda x: x[1], reverse=True)[:3]
-    
     # 매수벽(Bids) 중 물량이 가장 많은 상위 3개
     bids_sorted = sorted(orderbook['bids'], key=lambda x: x[1], reverse=True)[:3]
-    
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# 함수 2: Gemini AI 분석 (모델 변경됨: gemini-2.5-flash-lite)
+# 함수 2: Gemini AI 분석 (모델: gemini-2.5-flash-lite)
 # ---------------------------------------------------------
 def ask_gemini(df, trends, ratio, walls):
     try:
@@ -115,9 +119,7 @@ def ask_gemini(df, trends, ratio, walls):
         짧고 명확하게 한국어로 답변하세요.
         """
         
-        # ------------------------------------------------------------------
-        # [수정됨] 사용자가 요청한 모델명 적용
-        # ------------------------------------------------------------------
+        # 최신 모델 사용
         model = genai.GenerativeModel('gemini-2.5-flash-lite') 
         response = model.generate_content(prompt)
         return response.text
@@ -213,7 +215,7 @@ try:
     # [섹션 3] 실시간 주요 매물대 (Big Walls)
     # -----------------------------------------------------
     st.markdown("### 📊 실시간 주요 매물대 집중 구간 (Top 3)")
-    st.caption("현재 호가창에서 물량이 가장 많이 쌓인 가격대입니다. 이 가격대는 강력한 **지지(반등)** 또는 **저항(돌파어려움)** 역할을 합니다.")
+    st.caption("호가창에서 물량이 가장 많이 쌓인 구간입니다. 이 가격대는 강력한 지지/저항 역할을 합니다.")
 
     w1, w2 = st.columns(2)
     
