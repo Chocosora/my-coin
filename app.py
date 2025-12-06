@@ -10,12 +10,13 @@ import google.generativeai as genai
 # ---------------------------------------------------------
 # [설정] 구글 API 키
 # ---------------------------------------------------------
-API_KEY = "AIzaSyDecZIT6V6rO5pIwRcpeC_juEZ_E5CAnkQ"
+# 주의: 공유해주신 키는 보안상 지웠습니다. 본인의 키를 아래 따옴표 안에 넣어주세요.
+API_KEY = "AIzaSyCSwf5C2UTymiZUb3y-HPo0O9FYYq9xsI8"
 genai.configure(api_key=API_KEY)
 
 # 페이지 설정
 st.set_page_config(page_title="XRP All-in-One", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 8.0 - 매물대 추가)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 8.1 - 2.5 Flash Lite)")
 
 # 세션 상태 초기화
 if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
@@ -75,7 +76,7 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# 함수 2: Gemini AI 분석 (매물대 정보 추가됨)
+# 함수 2: Gemini AI 분석 (모델 변경됨: gemini-2.5-flash-lite)
 # ---------------------------------------------------------
 def ask_gemini(df, trends, ratio, walls):
     try:
@@ -114,7 +115,10 @@ def ask_gemini(df, trends, ratio, walls):
         짧고 명확하게 한국어로 답변하세요.
         """
         
-        model = genai.GenerativeModel('gemini-2.0-flash-lite-preview-02-05') 
+        # ------------------------------------------------------------------
+        # [수정됨] 사용자가 요청한 모델명 적용
+        # ------------------------------------------------------------------
+        model = genai.GenerativeModel('gemini-2.5-flash-lite') 
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
@@ -154,7 +158,7 @@ try:
         else:
             trends[h] = {'price': 0, 'change': 0.0}
 
-    # 매물대 계산 (신규 기능)
+    # 매물대 계산
     major_asks, major_bids = get_major_walls(orderbook)
 
     # 목표가 계산
@@ -206,7 +210,7 @@ try:
     st.divider()
 
     # -----------------------------------------------------
-    # [섹션 3] (신규) 실시간 주요 매물대 (Big Walls)
+    # [섹션 3] 실시간 주요 매물대 (Big Walls)
     # -----------------------------------------------------
     st.markdown("### 📊 실시간 주요 매물대 집중 구간 (Top 3)")
     st.caption("현재 호가창에서 물량이 가장 많이 쌓인 가격대입니다. 이 가격대는 강력한 **지지(반등)** 또는 **저항(돌파어려움)** 역할을 합니다.")
@@ -217,13 +221,13 @@ try:
         st.markdown("**📉 매도벽 (저항 구간)** - 뚫기 힘든 가격")
         for p, v in major_asks:
             st.write(f"- **{p:,.0f} 원** : {v:,.0f} 개 대기")
-            st.progress(min(v / (major_asks[0][1] * 1.2), 1.0)) # 시각적 바
+            st.progress(min(v / (major_asks[0][1] * 1.2), 1.0))
 
     with w2:
         st.markdown("**📈 매수벽 (지지 구간)** - 반등 예상 가격")
         for p, v in major_bids:
             st.write(f"- **{p:,.0f} 원** : {v:,.0f} 개 대기")
-            st.progress(min(v / (major_bids[0][1] * 1.2), 1.0)) # 시각적 바
+            st.progress(min(v / (major_bids[0][1] * 1.2), 1.0))
 
     # -----------------------------------------------------
     # [섹션 4] AI 분석
@@ -234,8 +238,7 @@ try:
     with c_btn:
         st.info("🤖 **AI 정밀 분석**")
         if st.button("Gemini 리포트 생성", type="primary"):
-            with st.spinner("Gemini 2.0 Flash Lite가 분석 중..."):
-                # 매물대 정보도 함께 전달
+            with st.spinner("Gemini 2.5 Flash Lite가 분석 중..."):
                 report = ask_gemini(df, trends, ratio, (major_asks, major_bids))
                 st.session_state['ai_report'] = report
                 st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
