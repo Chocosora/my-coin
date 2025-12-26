@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP All-in-One", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 8.3 - 상세 추세 분석)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 8.4 - 평단가 맞춤 분석)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드 (Streamlit Secrets 사용)
@@ -27,10 +27,15 @@ except Exception as e:
 if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
 if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 
-# 사이드바
+# 사이드바 설정
 st.sidebar.header("설정")
 timeframe = st.sidebar.radio("단타 시간 기준", ["3m", "5m", "15m", "30m"], index=1)
 auto_refresh = st.sidebar.checkbox("실시간 자동갱신", value=True)
+
+st.sidebar.markdown("---")
+st.sidebar.header("💼 내 자산 설정")
+# 평단가 입력 필드 추가 (0이면 신규 진입으로 간주)
+my_avg_price = st.sidebar.number_input("내 평단가 (원)", min_value=0.0, step=1.0, format="%.0f", help="0 입력 시 신규 진입 관점으로 분석합니다.")
 
 exchange = ccxt.upbit()
 
@@ -76,17 +81,44 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# 함수 2: Gemini AI 분석 (모델: gemini-2.5-flash-lite)
+# 함수 2: Gemini AI 분석 (평단가 반영 로직 추가)
 # ---------------------------------------------------------
-def ask_gemini(df, trends, ratio, walls):
+def ask_gemini(df, trends, ratio, walls, my_price=0):
     try:
         curr = df.iloc[-1]
         last = df.iloc[-2]
+        curr_price = curr['close']
         major_asks, major_bids = walls
         
         asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
         bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
         
+        # 평단가 보유 여부에 따른 프롬프트 분기
+        user_position_text = ""
+        strategy_request = ""
+
+        if my_price > 0:
+            pnl_rate = ((curr_price - my_price) / my_price) * 100
+            user_position_text = f"""
+            [4. 사용자 포지션 (보유자)]
+            - 사용자 평단가: {my_price:,.0f}원
+            - 현재 수익률: {pnl_rate:.2f}%
+            """
+            strategy_request = f"""
+            3. [맞춤 대응 전략]
+               - 사용자는 현재 {pnl_rate:.2f}% 수익률 상태입니다.
+               - 지금 추세와 호가창을 볼 때: '계속 홀딩', '일부 익절', '전량 매도', '물타기', '손절' 중 어떤 것이 유리한지 명확히 조언하세요.
+               - 물타기가 필요하다면 추천 가격대를, 익절/손절이라면 구체적인 가격을 제시하세요.
+            """
+        else:
+            user_position_text = "[4. 사용자 포지션] 현재 미보유 (신규 진입 대기)"
+            strategy_request = """
+            3. [신규 진입 전략]
+               - 신규 진입 추천가
+               - 1차 목표가
+               - 손절 기준가
+            """
+
         prompt = f"""
         당신은 암호화폐 전문 트레이더입니다. XRP 데이터를 보고 매매 전략을 세워주세요.
         
@@ -104,12 +136,14 @@ def ask_gemini(df, trends, ratio, walls):
         - 저항(매도): {asks_str}
         - 지지(매수): {bids_str}
         
+        {user_position_text}
+        
         위 정보를 종합하여:
         1. [시황] 현재 분위기 한 줄 요약
         2. [매물대 분석] 돌파 가능성 판단
-        3. [전략] 진입가, 목표가, 손절가 제안
+        {strategy_request}
         
-        짧고 명확하게 한국어로 답변하세요.
+        짧고 명확하게 한국어로 답변하세요. 불필요한 서론은 생략하세요.
         """
         
         model = genai.GenerativeModel('gemini-2.5-flash-lite') 
@@ -124,9 +158,6 @@ def ask_gemini(df, trends, ratio, walls):
 def get_detailed_trend_summary(trends):
     c24 = trends[24]['change'] # 24시간 추세 (장기)
     c3 = trends[3]['change']   # 3시간 추세 (단기)
-    
-    # 4가지 기간의 평균 변동률
-    avg_change = (c24 + trends[12]['change'] + trends[6]['change'] + c3) / 4
     
     summary = ""
     action = ""
@@ -210,11 +241,10 @@ try:
     kst_now_str = get_kst_now().strftime('%H:%M:%S')
 
     # -----------------------------------------------------
-    # [섹션 1] 장기 추세 대시보드 (상세 분석 적용)
+    # [섹션 1] 장기 추세 대시보드
     # -----------------------------------------------------
     st.markdown("### 🗓️ 시간별 추세 분석 (Detailed Trend)")
     
-    # 상세 분석 리포트 출력
     st.info(get_detailed_trend_summary(trends))
     
     t1, t2, t3, t4 = st.columns(4)
@@ -244,10 +274,10 @@ try:
     st.divider()
 
     # -----------------------------------------------------
-    # [섹션 3] 실시간 주요 매물대 (Big Walls)
+    # [섹션 3] 실시간 주요 매물대 (Top 3)
     # -----------------------------------------------------
-    st.markdown("### 📊 실시간 주요 매물대 집중 구간 (Top 3)")
-    st.caption("호가창에서 물량이 가장 많이 쌓인 구간입니다. 이 가격대는 강력한 지지/저항 역할을 합니다.")
+    st.markdown("### 📊 실시간 주요 매물대 집중 구간")
+    st.caption("호가창에서 물량이 가장 많이 쌓인 구간입니다. 강력한 지지/저항 역할을 합니다.")
 
     w1, w2 = st.columns(2)
     
@@ -264,16 +294,23 @@ try:
             st.progress(min(v / (major_bids[0][1] * 1.2), 1.0))
 
     # -----------------------------------------------------
-    # [섹션 4] AI 분석
+    # [섹션 4] AI 분석 (평단가 로직 반영)
     # -----------------------------------------------------
     st.divider()
     c_btn, c_res = st.columns([1, 3])
     
     with c_btn:
         st.info("🤖 **AI 정밀 분석**")
-        if st.button("Gemini 리포트 생성", type="primary"):
-            with st.spinner("Gemini 2.5 Flash Lite가 분석 중..."):
-                report = ask_gemini(df, trends, ratio, (major_asks, major_bids))
+        
+        # 버튼 텍스트에 평단가 상태 반영
+        btn_label = "Gemini 리포트 생성"
+        if my_avg_price > 0:
+            btn_label = f"평단 {my_avg_price:,.0f}원 기준 분석"
+            
+        if st.button(btn_label, type="primary"):
+            with st.spinner("Gemini가 차트와 평단가를 분석 중..."):
+                # 평단가(my_avg_price)를 함께 전달
+                report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price)
                 st.session_state['ai_report'] = report
                 st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                 
@@ -282,7 +319,10 @@ try:
             st.success(f"**[분석 완료: {st.session_state['report_time']} KST]**")
             st.write(st.session_state['ai_report'])
         else:
-            st.warning("버튼을 누르면 AI 분석 결과가 여기에 표시됩니다.")
+            if my_avg_price > 0:
+                st.warning(f"현재 평단가 **{my_avg_price:,.0f}원**으로 설정되었습니다. 버튼을 눌러 맞춤 전략을 확인하세요.")
+            else:
+                st.warning("버튼을 누르면 AI 분석 결과가 표시됩니다. (평단가 0원 = 신규 진입 모드)")
 
     # -----------------------------------------------------
     # [섹션 5] 차트
@@ -292,6 +332,11 @@ try:
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_upper'], line=dict(color='gray', width=1), name='상단'))
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_mid'], line=dict(color='orange', width=1), name='중단'))
     fig.add_trace(go.Scatter(x=df['timestamp'], y=df['bb_lower'], line=dict(color='blue', width=2), name='하단'))
+    
+    # 평단가 라인 추가 (설정되었을 경우에만)
+    if my_avg_price > 0:
+        fig.add_hline(y=my_avg_price, line_dash="dash", line_color="green", annotation_text="내 평단가")
+
     fig.update_layout(height=400, margin=dict(t=10,b=10,l=10,r=10), title=f"{timeframe} 차트")
     fig.update_xaxes(rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
