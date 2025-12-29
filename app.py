@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 9.1 - Custom Model Force Map)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 9.3 - Exact Model Mapping)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -24,16 +24,35 @@ except Exception as e:
     st.stop()
 
 # ---------------------------------------------------------
-# [상태 관리] 세션 초기화 (RPD 카운터 포함)
+# [유틸] 한국 시간(KST) 구하기
+# ---------------------------------------------------------
+def get_kst_now():
+    return datetime.utcnow() + timedelta(hours=9)
+
+# ---------------------------------------------------------
+# [상태 관리] 세션 초기화 (RPD 카운터 + 날짜 추적)
 # ---------------------------------------------------------
 if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
 if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 if 'report_model' not in st.session_state: st.session_state['report_model'] = ""
 
-# 모델별 RPD 카운터 초기화
+# 카운터 초기화
 if 'cnt_model_3' not in st.session_state: st.session_state['cnt_model_3'] = 0
 if 'cnt_model_25' not in st.session_state: st.session_state['cnt_model_25'] = 0
 if 'cnt_model_25_lite' not in st.session_state: st.session_state['cnt_model_25_lite'] = 0
+
+# [자동 초기화] 날짜 변경 감지
+current_date_str = get_kst_now().strftime("%Y-%m-%d")
+if 'last_run_date' not in st.session_state:
+    st.session_state['last_run_date'] = current_date_str
+
+# 저장된 날짜와 현재 날짜가 다르면 (자정이 지났으면) 리셋
+if st.session_state['last_run_date'] != current_date_str:
+    st.session_state['cnt_model_3'] = 0
+    st.session_state['cnt_model_25'] = 0
+    st.session_state['cnt_model_25_lite'] = 0
+    st.session_state['last_run_date'] = current_date_str
+    st.toast("📅 날짜가 변경되어 API 사용량이 초기화되었습니다!")
 
 # ---------------------------------------------------------
 # [사이드바] 설정
@@ -51,18 +70,19 @@ my_avg_price = st.sidebar.number_input("내 평단가 (원)", min_value=0.0, ste
 # ---------------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.header("📊 AI 사용량 (RPD)")
-st.sidebar.caption("※ 하루 20회 제한 관리용 (세션 기준)")
+st.sidebar.caption(f"📅 기준일: {st.session_state['last_run_date']}")
 
 # 게이지 바 형태로 표시
 def draw_rpd(label, count, max_val=20):
     st.write(f"**{label}** ({count}/{max_val})")
     st.progress(min(count / max_val, 1.0))
 
+# 스크린샷에 있는 모델명 그대로 표시
 draw_rpd("gemini-3-flash", st.session_state['cnt_model_3'])
 draw_rpd("gemini-2.5-flash", st.session_state['cnt_model_25'])
 draw_rpd("gemini-2.5-flash-lite", st.session_state['cnt_model_25_lite'])
 
-if st.sidebar.button("카운터 초기화 (새로운 날)"):
+if st.sidebar.button("강제 초기화"):
     st.session_state['cnt_model_3'] = 0
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
@@ -73,9 +93,6 @@ exchange = ccxt.upbit()
 # ---------------------------------------------------------
 # [함수] 데이터 수집 및 처리
 # ---------------------------------------------------------
-def get_kst_now():
-    return datetime.utcnow() + timedelta(hours=9)
-
 def get_all_data():
     # 단타 데이터
     ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
@@ -106,9 +123,9 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# [핵심] AI 분석 함수 (강제 매핑 적용)
+# [핵심] AI 분석 함수 (스크린샷 기반 매핑)
 # ---------------------------------------------------------
-def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flash"):
+def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flash-lite"):
     try:
         curr = df.iloc[-1]
         last = df.iloc[-2]
@@ -166,12 +183,12 @@ def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flas
         잡담은 생략하고 핵심만 굵고 짧게 전달하십시오.
         """
         
-        # [중요] 사용자가 요청한 모델명 그대로 강제 호출
+        # [중요] 스크린샷에 있는 모델명 그대로 호출
         model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"🚨 AI 호출 오류: {e} (모델명: {model_name} 확인 필요)"
+        return f"🚨 AI 분석 오류: {e}\n(모델명 '{model_name}'이 API에서 거부되었습니다. 스펠링이나 권한을 확인해주세요.)"
 
 # ---------------------------------------------------------
 # [함수] 상세 추세 요약
@@ -260,11 +277,11 @@ try:
             st.progress(min(v / (major_bids[0][1]*1.2), 1.0))
 
     # -----------------------------------------------------
-    # [섹션 4] AI 전략 분석 센터 (Multi-Model)
+    # [섹션 4] AI 전략 분석 센터 (모델 선택)
     # -----------------------------------------------------
     st.divider()
-    st.markdown("### 🧠 AI 전략 분석 센터 (모델 선택)")
-    st.caption("※ 각 모델별로 하루 20회 분석이 가능합니다. 상황에 맞춰 모델을 선택하세요.")
+    st.markdown("### 🧠 AI 전략 분석 센터 (API List Based)")
+    st.caption("※ 스크린샷에 있는 모델명을 정확히 호출합니다.")
 
     if my_avg_price > 0:
         st.success(f"📌 **평단가 {my_avg_price:,.0f}원** 기준 맞춤 전략을 생성합니다.")
@@ -274,13 +291,13 @@ try:
     # 3개의 컬럼으로 버튼 분리
     mb1, mb2, mb3 = st.columns(3)
     
-    # 모델 1: gemini-3-flash (강제 매핑)
+    # 모델 1: gemini-3-flash
     with mb1:
         st.markdown("##### ⚡ gemini-3-flash")
         if st.button("분석 실행 (3-flash)", type="primary", use_container_width=True):
             if st.session_state['cnt_model_3'] < 20:
                 with st.spinner("Gemini 3-Flash 분석 중..."):
-                    # 요청하신 모델명 그대로 전송
+                    # 스크린샷 그대로 매핑
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-3-flash")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
@@ -290,13 +307,13 @@ try:
             else:
                 st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
 
-    # 모델 2: gemini-2.5-flash (강제 매핑)
+    # 모델 2: gemini-2.5-flash
     with mb2:
         st.markdown("##### 🧠 gemini-2.5-flash")
         if st.button("분석 실행 (2.5-flash)", use_container_width=True):
             if st.session_state['cnt_model_25'] < 20:
                 with st.spinner("Gemini 2.5-Flash 분석 중..."):
-                    # 요청하신 모델명 그대로 전송
+                    # 스크린샷 그대로 매핑
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
@@ -306,13 +323,13 @@ try:
             else:
                 st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
 
-    # 모델 3: gemini-2.5-flash-lite (강제 매핑)
+    # 모델 3: gemini-2.5-flash-lite
     with mb3:
         st.markdown("##### 🚀 gemini-2.5-flash-lite")
         if st.button("분석 실행 (2.5-lite)", use_container_width=True):
             if st.session_state['cnt_model_25_lite'] < 20:
                 with st.spinner("Gemini 2.5-Lite 분석 중..."):
-                    # 요청하신 모델명 그대로 전송
+                    # 스크린샷 그대로 매핑
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash-lite")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
