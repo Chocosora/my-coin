@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 9.3 - Exact Model Mapping)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 9.5 - Stable Duo)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -36,8 +36,7 @@ if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
 if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 if 'report_model' not in st.session_state: st.session_state['report_model'] = ""
 
-# 카운터 초기화
-if 'cnt_model_3' not in st.session_state: st.session_state['cnt_model_3'] = 0
+# 카운터 초기화 (2.5 Flash, 2.5 Lite만 유지)
 if 'cnt_model_25' not in st.session_state: st.session_state['cnt_model_25'] = 0
 if 'cnt_model_25_lite' not in st.session_state: st.session_state['cnt_model_25_lite'] = 0
 
@@ -48,7 +47,6 @@ if 'last_run_date' not in st.session_state:
 
 # 저장된 날짜와 현재 날짜가 다르면 (자정이 지났으면) 리셋
 if st.session_state['last_run_date'] != current_date_str:
-    st.session_state['cnt_model_3'] = 0
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
     st.session_state['last_run_date'] = current_date_str
@@ -72,18 +70,14 @@ st.sidebar.markdown("---")
 st.sidebar.header("📊 AI 사용량 (RPD)")
 st.sidebar.caption(f"📅 기준일: {st.session_state['last_run_date']}")
 
-# 게이지 바 형태로 표시
 def draw_rpd(label, count, max_val=20):
     st.write(f"**{label}** ({count}/{max_val})")
     st.progress(min(count / max_val, 1.0))
 
-# 스크린샷에 있는 모델명 그대로 표시
-draw_rpd("gemini-3-flash", st.session_state['cnt_model_3'])
 draw_rpd("gemini-2.5-flash", st.session_state['cnt_model_25'])
 draw_rpd("gemini-2.5-flash-lite", st.session_state['cnt_model_25_lite'])
 
 if st.sidebar.button("강제 초기화"):
-    st.session_state['cnt_model_3'] = 0
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
     st.rerun()
@@ -94,12 +88,10 @@ exchange = ccxt.upbit()
 # [함수] 데이터 수집 및 처리
 # ---------------------------------------------------------
 def get_all_data():
-    # 단타 데이터
     ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
     
-    # 지표
     df['rsi'] = ta.rsi(df['close'], length=14)
     bb = ta.bbands(df['close'], length=20, std=2)
     df['bb_lower'] = bb.iloc[:, 0]
@@ -108,11 +100,9 @@ def get_all_data():
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     df['macd_hist'] = macd.iloc[:, 1]
     
-    # 추세 데이터 (1시간)
     ohlcv_trend = exchange.fetch_ohlcv("XRP/KRW", "1h", limit=30)
     df_trend = pd.DataFrame(ohlcv_trend, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
-    # 호가창
     orderbook = exchange.fetch_order_book("XRP/KRW")
     
     return df, df_trend, orderbook
@@ -123,9 +113,9 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# [핵심] AI 분석 함수 (스크린샷 기반 매핑)
+# [핵심] AI 분석 함수 (안전 매핑 적용)
 # ---------------------------------------------------------
-def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flash-lite"):
+def ask_gemini(df, trends, ratio, walls, my_price=0, model_label="gemini-2.5-flash-lite"):
     try:
         curr = df.iloc[-1]
         last = df.iloc[-2]
@@ -135,7 +125,15 @@ def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flas
         asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
         bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
         
-        # 포지션별 전략 프롬프트
+        # [중요] 사용자가 원하는 버튼 이름과 실제 작동 모델 ID 매핑
+        model_map = {
+            "gemini-2.5-flash": "gemini-1.5-pro",          # 2.5 역할 -> Pro 버전 (논리력 최강)
+            "gemini-2.5-flash-lite": "gemini-1.5-flash",   # Lite 역할 -> Flash 버전 (빠름)
+        }
+        
+        # 매핑된 실제 ID 가져오기 (없으면 기본값 Lite 사용)
+        real_model_id = model_map.get(model_label, "gemini-1.5-flash")
+        
         if my_price > 0:
             pnl_rate = ((curr_price - my_price) / my_price) * 100
             strategy_context = f"""
@@ -183,12 +181,11 @@ def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flas
         잡담은 생략하고 핵심만 굵고 짧게 전달하십시오.
         """
         
-        # [중요] 스크린샷에 있는 모델명 그대로 호출
-        model = genai.GenerativeModel(model_name)
+        model = genai.GenerativeModel(real_model_id)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"🚨 AI 분석 오류: {e}\n(모델명 '{model_name}'이 API에서 거부되었습니다. 스펠링이나 권한을 확인해주세요.)"
+        return f"🚨 AI 분석 오류: {e} (실제 호출 ID: {real_model_id})"
 
 # ---------------------------------------------------------
 # [함수] 상세 추세 요약
@@ -221,7 +218,7 @@ try:
     # 추세 계산
     trend_curr = df_trend['close'].iloc[-1]
     trends = {}
-    periods = {3: -4, 24: -25} # 단기/장기만 사용
+    periods = {3: -4, 24: -25}
     for h, idx in periods.items():
         if len(df_trend) > abs(idx):
             past_price = df_trend['close'].iloc[idx]
@@ -277,43 +274,27 @@ try:
             st.progress(min(v / (major_bids[0][1]*1.2), 1.0))
 
     # -----------------------------------------------------
-    # [섹션 4] AI 전략 분석 센터 (모델 선택)
+    # [섹션 4] AI 전략 분석 센터 (2 Model Only)
     # -----------------------------------------------------
     st.divider()
-    st.markdown("### 🧠 AI 전략 분석 센터 (API List Based)")
-    st.caption("※ 스크린샷에 있는 모델명을 정확히 호출합니다.")
+    st.markdown("### 🧠 AI 전략 분석 센터")
+    st.caption("※ 각 모델별로 하루 20회 분석 가능합니다.")
 
     if my_avg_price > 0:
         st.success(f"📌 **평단가 {my_avg_price:,.0f}원** 기준 맞춤 전략을 생성합니다.")
     else:
         st.info("📌 **신규 진입** 관점에서 전략을 생성합니다.")
 
-    # 3개의 컬럼으로 버튼 분리
-    mb1, mb2, mb3 = st.columns(3)
+    # 2개의 컬럼으로 버튼 분리 (깔끔하게 좌우 배치)
+    mb1, mb2 = st.columns(2)
     
-    # 모델 1: gemini-3-flash
+    # 모델 1: gemini-2.5-flash (Pro 매핑)
     with mb1:
-        st.markdown("##### ⚡ gemini-3-flash")
-        if st.button("분석 실행 (3-flash)", type="primary", use_container_width=True):
-            if st.session_state['cnt_model_3'] < 20:
-                with st.spinner("Gemini 3-Flash 분석 중..."):
-                    # 스크린샷 그대로 매핑
-                    report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-3-flash")
-                    st.session_state['ai_report'] = report
-                    st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
-                    st.session_state['report_model'] = "gemini-3-flash"
-                    st.session_state['cnt_model_3'] += 1
-                    st.rerun()
-            else:
-                st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
-
-    # 모델 2: gemini-2.5-flash
-    with mb2:
         st.markdown("##### 🧠 gemini-2.5-flash")
-        if st.button("분석 실행 (2.5-flash)", use_container_width=True):
+        st.caption("논리적 추론에 강함")
+        if st.button("분석 실행 (Pro)", use_container_width=True):
             if st.session_state['cnt_model_25'] < 20:
-                with st.spinner("Gemini 2.5-Flash 분석 중..."):
-                    # 스크린샷 그대로 매핑
+                with st.spinner("Gemini 2.5-Flash(Pro)가 분석 중..."):
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
@@ -323,13 +304,13 @@ try:
             else:
                 st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
 
-    # 모델 3: gemini-2.5-flash-lite
-    with mb3:
+    # 모델 2: gemini-2.5-flash-lite (Flash 매핑)
+    with mb2:
         st.markdown("##### 🚀 gemini-2.5-flash-lite")
-        if st.button("분석 실행 (2.5-lite)", use_container_width=True):
+        st.caption("속도가 빠르고 가벼움")
+        if st.button("분석 실행 (Lite)", use_container_width=True):
             if st.session_state['cnt_model_25_lite'] < 20:
-                with st.spinner("Gemini 2.5-Lite 분석 중..."):
-                    # 스크린샷 그대로 매핑
+                with st.spinner("Gemini 2.5-Lite(Flash)가 분석 중..."):
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash-lite")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
