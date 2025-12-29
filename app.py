@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 9.5 - Stable Duo)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.0 - 스미마셍)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -74,6 +74,7 @@ def draw_rpd(label, count, max_val=20):
     st.write(f"**{label}** ({count}/{max_val})")
     st.progress(min(count / max_val, 1.0))
 
+# 사용자님이 요청하신 이름 그대로 표시
 draw_rpd("gemini-2.5-flash", st.session_state['cnt_model_25'])
 draw_rpd("gemini-2.5-flash-lite", st.session_state['cnt_model_25_lite'])
 
@@ -113,9 +114,9 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# [핵심] AI 분석 함수 (안전 매핑 적용)
+# [핵심] AI 분석 함수 (절대 매핑 금지, 직통 호출)
 # ---------------------------------------------------------
-def ask_gemini(df, trends, ratio, walls, my_price=0, model_label="gemini-2.5-flash-lite"):
+def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flash-lite"):
     try:
         curr = df.iloc[-1]
         last = df.iloc[-2]
@@ -124,15 +125,6 @@ def ask_gemini(df, trends, ratio, walls, my_price=0, model_label="gemini-2.5-fla
         
         asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
         bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
-        
-        # [중요] 사용자가 원하는 버튼 이름과 실제 작동 모델 ID 매핑
-        model_map = {
-            "gemini-2.5-flash": "gemini-1.5-pro",          # 2.5 역할 -> Pro 버전 (논리력 최강)
-            "gemini-2.5-flash-lite": "gemini-1.5-flash",   # Lite 역할 -> Flash 버전 (빠름)
-        }
-        
-        # 매핑된 실제 ID 가져오기 (없으면 기본값 Lite 사용)
-        real_model_id = model_map.get(model_label, "gemini-1.5-flash")
         
         if my_price > 0:
             pnl_rate = ((curr_price - my_price) / my_price) * 100
@@ -181,11 +173,12 @@ def ask_gemini(df, trends, ratio, walls, my_price=0, model_label="gemini-2.5-fla
         잡담은 생략하고 핵심만 굵고 짧게 전달하십시오.
         """
         
-        model = genai.GenerativeModel(real_model_id)
+        # [절대 수정 금지] 매핑 없이 사용자님이 지정한 문자열 그대로 호출
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"🚨 AI 분석 오류: {e} (실제 호출 ID: {real_model_id})"
+        return f"🚨 AI 분석 오류: {e} (호출한 모델명: {model_name})"
 
 # ---------------------------------------------------------
 # [함수] 상세 추세 요약
@@ -288,13 +281,13 @@ try:
     # 2개의 컬럼으로 버튼 분리 (깔끔하게 좌우 배치)
     mb1, mb2 = st.columns(2)
     
-    # 모델 1: gemini-2.5-flash (Pro 매핑)
+    # 모델 1: gemini-2.5-flash (직접 호출)
     with mb1:
         st.markdown("##### 🧠 gemini-2.5-flash")
-        st.caption("논리적 추론에 강함")
-        if st.button("분석 실행 (Pro)", use_container_width=True):
+        if st.button("분석 실행 (Flash)", type="primary", use_container_width=True):
             if st.session_state['cnt_model_25'] < 20:
-                with st.spinner("Gemini 2.5-Flash(Pro)가 분석 중..."):
+                with st.spinner("Gemini 2.5-Flash 분석 중..."):
+                    # 매핑 없이 바로 문자열 전송
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
@@ -304,13 +297,13 @@ try:
             else:
                 st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
 
-    # 모델 2: gemini-2.5-flash-lite (Flash 매핑)
+    # 모델 2: gemini-2.5-flash-lite (직접 호출)
     with mb2:
         st.markdown("##### 🚀 gemini-2.5-flash-lite")
-        st.caption("속도가 빠르고 가벼움")
         if st.button("분석 실행 (Lite)", use_container_width=True):
             if st.session_state['cnt_model_25_lite'] < 20:
-                with st.spinner("Gemini 2.5-Lite(Flash)가 분석 중..."):
+                with st.spinner("Gemini 2.5-Lite 분석 중..."):
+                    # 매핑 없이 바로 문자열 전송
                     report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash-lite")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
