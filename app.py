@@ -4,8 +4,6 @@ import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
 import time
-import requests
-import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
 
@@ -13,21 +11,17 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.1 - DeepSeek Added)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.3 - Prompt Gen)")
 
 # ---------------------------------------------------------
-# [보안] API 키 로드
+# [보안] 구글 API 키 로드
 # ---------------------------------------------------------
-# 1. Google Gemini
 try:
     API_KEY = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=API_KEY)
 except Exception as e:
-    st.error("🚨 구글 API 키 오류. Streamlit Secrets를 확인하세요.")
+    st.error("🚨 API 키 오류. Streamlit Secrets에 'GOOGLE_API_KEY'를 확인하세요.")
     st.stop()
-
-# 2. DeepSeek (사용자 제공 키)
-DEEPSEEK_API_KEY = "sk-96b4e887532644eab93969260a4ac343"
 
 # ---------------------------------------------------------
 # [유틸] 한국 시간(KST) 구하기
@@ -41,11 +35,11 @@ def get_kst_now():
 if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
 if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 if 'report_model' not in st.session_state: st.session_state['report_model'] = ""
+if 'generated_prompt' not in st.session_state: st.session_state['generated_prompt'] = ""
 
-# 카운터 초기화 (Gemini 2개 + DeepSeek 1개)
+# 카운터 초기화 (Gemini 2개만 유지)
 if 'cnt_model_25' not in st.session_state: st.session_state['cnt_model_25'] = 0
 if 'cnt_model_25_lite' not in st.session_state: st.session_state['cnt_model_25_lite'] = 0
-if 'cnt_deepseek' not in st.session_state: st.session_state['cnt_deepseek'] = 0
 
 # [자동 초기화] 날짜 변경 감지
 current_date_str = get_kst_now().strftime("%Y-%m-%d")
@@ -55,7 +49,6 @@ if 'last_run_date' not in st.session_state:
 if st.session_state['last_run_date'] != current_date_str:
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
-    st.session_state['cnt_deepseek'] = 0
     st.session_state['last_run_date'] = current_date_str
     st.toast("📅 날짜가 변경되어 API 사용량이 초기화되었습니다!")
 
@@ -83,12 +76,10 @@ def draw_rpd(label, count, max_val=20):
 
 draw_rpd("gemini-2.5-flash", st.session_state['cnt_model_25'])
 draw_rpd("gemini-2.5-flash-lite", st.session_state['cnt_model_25_lite'])
-draw_rpd("DeepSeek-V3", st.session_state['cnt_deepseek'])
 
 if st.sidebar.button("강제 초기화"):
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
-    st.session_state['cnt_deepseek'] = 0
     st.rerun()
 
 exchange = ccxt.upbit()
@@ -122,43 +113,8 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# [함수] DeepSeek 분석 (New)
+# [함수] 프롬프트 생성기 (핵심)
 # ---------------------------------------------------------
-def ask_deepseek(prompt_text):
-    url = "https://api.deepseek.com/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": "You are a professional crypto trader."},
-            {"role": "user", "content": prompt_text}
-        ],
-        "stream": False
-    }
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(data))
-        if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content']
-        else:
-            return f"Error: {response.status_code} - {response.text}"
-    except Exception as e:
-        return f"DeepSeek 호출 오류: {e}"
-
-# ---------------------------------------------------------
-# [함수] Gemini 분석 (Existing)
-# ---------------------------------------------------------
-def ask_gemini(prompt_text, model_name="gemini-2.5-flash-lite"):
-    try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt_text)
-        return response.text
-    except Exception as e:
-        return f"🚨 AI 분석 오류: {e}"
-
-# 프롬프트 생성 함수 (공통 사용)
 def make_prompt(df, trends, ratio, walls, my_price):
     curr = df.iloc[-1]
     last = df.iloc[-2]
@@ -168,6 +124,7 @@ def make_prompt(df, trends, ratio, walls, my_price):
     asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
     bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
     
+    # 평단가 유무에 따른 전략 분기
     if my_price > 0:
         pnl_rate = ((curr_price - my_price) / my_price) * 100
         strategy_context = f"""
@@ -216,6 +173,17 @@ def make_prompt(df, trends, ratio, walls, my_price):
     """
 
 # ---------------------------------------------------------
+# [함수] Gemini 호출
+# ---------------------------------------------------------
+def ask_gemini(prompt_text, model_name="gemini-2.5-flash-lite"):
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt_text)
+        return response.text
+    except Exception as e:
+        return f"🚨 AI 분석 오류: {e}"
+
+# ---------------------------------------------------------
 # [함수] 상세 추세 요약
 # ---------------------------------------------------------
 def get_detailed_trend_summary(trends):
@@ -243,19 +211,17 @@ try:
     curr = df.iloc[-1]
     curr_price = float(curr['close'])
     
-    # [수정] 추세 계산 (24, 6, 3, 1시간 전 대비)
     trends = {}
-    periods = {1: -2, 3: -4, 6: -7, 24: -25} # 1h봉 기준 인덱스
+    periods = {1: -2, 3: -4, 6: -7, 24: -25}
     
     for h, idx in periods.items():
         if len(df_trend) > abs(idx):
             past_price = df_trend['close'].iloc[idx]
-            change_rate = ((curr_price - past_price) / past_price) * 100 # 현재가 기준 변동률
+            change_rate = ((curr_price - past_price) / past_price) * 100
             trends[h] = {'price': past_price, 'change': change_rate}
         else:
             trends[h] = {'price': 0, 'change': 0.0}
 
-    # 매물대 및 지표
     major_asks, major_bids = get_major_walls(orderbook)
     bids = sum([x[1] for x in orderbook['bids']])
     asks = sum([x[1] for x in orderbook['asks']])
@@ -263,12 +229,11 @@ try:
     kst_now_str = get_kst_now().strftime('%H:%M:%S')
 
     # -----------------------------------------------------
-    # [섹션 1] 장기 추세 (요청하신 대로 수정됨)
+    # [섹션 1] 장기 추세
     # -----------------------------------------------------
     st.markdown("### 🗓️ 시간별 추세 요약 (현재가 기준 변동률)")
     st.info(get_detailed_trend_summary(trends))
     
-    # 24, 6, 3, 1 시간 전 가격과 변동률 표시
     t1, t2, t3, t4 = st.columns(4)
     t1.metric("24시간 전", f"{trends[24]['price']:,.0f}원", f"{trends[24]['change']:.2f}%")
     t2.metric("6시간 전", f"{trends[6]['price']:,.0f}원", f"{trends[6]['change']:.2f}%")
@@ -305,21 +270,21 @@ try:
             st.progress(min(v / (major_bids[0][1]*1.2), 1.0))
 
     # -----------------------------------------------------
-    # [섹션 4] AI 전략 분석 센터 (Gemini + DeepSeek)
+    # [섹션 4] AI 전략 분석 센터
     # -----------------------------------------------------
     st.divider()
-    st.markdown("### 🧠 AI 전략 분석 센터")
-    st.caption("※ Gemini는 기존 모델, DeepSeek는 새로 추가된 추론 모델입니다.")
+    st.markdown("### 🧠 AI 전략 분석 & 프롬프트 생성")
+    st.caption("※ API 호출 비용이 부담된다면, **'프롬프트 생성'**을 눌러 복사한 뒤 무료 AI에게 물어보세요.")
 
     if my_avg_price > 0:
         st.success(f"📌 **평단가 {my_avg_price:,.0f}원** 기준 맞춤 전략을 생성합니다.")
     else:
         st.info("📌 **신규 진입** 관점에서 전략을 생성합니다.")
 
-    # 공통 프롬프트 생성
-    common_prompt = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price)
+    # 공통 프롬프트 준비
+    prompt_text = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price)
 
-    # 3개의 컬럼으로 버튼 분리 (Gemini 2개 + DeepSeek 1개)
+    # 3개의 컬럼 (Flash / Lite / Prompt Gen)
     mb1, mb2, mb3 = st.columns(3)
     
     # 모델 1: Gemini 2.5 Flash
@@ -327,53 +292,57 @@ try:
         st.markdown("##### 🧠 Gemini 2.5 Flash")
         if st.button("분석 실행 (Flash)", type="primary", use_container_width=True):
             if st.session_state['cnt_model_25'] < 20:
-                with st.spinner("Gemini 2.5-Flash 분석 중..."):
-                    report = ask_gemini(common_prompt, "gemini-2.5-flash")
+                with st.spinner("분석 중..."):
+                    report = ask_gemini(prompt_text, "gemini-2.5-flash")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                     st.session_state['report_model'] = "gemini-2.5-flash"
                     st.session_state['cnt_model_25'] += 1
+                    # 프롬프트 화면은 초기화
+                    st.session_state['generated_prompt'] = ""
                     st.rerun()
             else:
-                st.error("오늘치 사용량 소진")
+                st.error("사용량 소진")
 
     # 모델 2: Gemini 2.5 Lite
     with mb2:
         st.markdown("##### 🚀 Gemini 2.5 Lite")
         if st.button("분석 실행 (Lite)", use_container_width=True):
             if st.session_state['cnt_model_25_lite'] < 20:
-                with st.spinner("Gemini 2.5-Lite 분석 중..."):
-                    report = ask_gemini(common_prompt, "gemini-2.5-flash-lite")
+                with st.spinner("분석 중..."):
+                    report = ask_gemini(prompt_text, "gemini-2.5-flash-lite")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                     st.session_state['report_model'] = "gemini-2.5-flash-lite"
                     st.session_state['cnt_model_25_lite'] += 1
+                    # 프롬프트 화면은 초기화
+                    st.session_state['generated_prompt'] = ""
                     st.rerun()
             else:
-                st.error("오늘치 사용량 소진")
+                st.error("사용량 소진")
 
-    # 모델 3: DeepSeek (NEW)
+    # [NEW] 프롬프트 생성 버튼
     with mb3:
-        st.markdown("##### 🐳 DeepSeek V3")
-        st.caption("New! 딥시크 추론")
-        if st.button("분석 실행 (DeepSeek)", use_container_width=True):
-            if st.session_state['cnt_deepseek'] < 20:
-                with st.spinner("DeepSeek가 분석 중입니다..."):
-                    report = ask_deepseek(common_prompt)
-                    st.session_state['ai_report'] = report
-                    st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
-                    st.session_state['report_model'] = "DeepSeek-V3"
-                    st.session_state['cnt_deepseek'] += 1
-                    st.rerun()
-            else:
-                st.error("오늘치 사용량 소진")
+        st.markdown("##### 📋 무료 상담용 프롬프트")
+        st.caption("DeepSeek/ChatGPT용")
+        if st.button("프롬프트 생성", use_container_width=True):
+            st.session_state['generated_prompt'] = prompt_text
+            # 기존 리포트 화면은 가림
+            st.session_state['ai_report'] = None 
+            st.rerun()
 
-    # 분석 결과 출력 공간
+    # 결과 화면 분기 (AI 리포트 vs 프롬프트 코드)
     if st.session_state['ai_report']:
         st.markdown("---")
         st.subheader(f"📢 분석 결과 ({st.session_state['report_model']})")
         st.caption(f"Update: {st.session_state['report_time']}")
         st.markdown(st.session_state['ai_report'])
+        
+    if st.session_state['generated_prompt']:
+        st.markdown("---")
+        st.subheader("📋 생성된 프롬프트 (복사 가능)")
+        st.caption("아래 코드를 복사(우측 상단 아이콘)해서 **DeepSeek**나 **ChatGPT**에 붙여넣으세요.")
+        st.code(st.session_state['generated_prompt'], language='text')
 
     # -----------------------------------------------------
     # [섹션 5] 차트
