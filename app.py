@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.3 - Prompt Gen)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.4 - Hedge Fund Prompt)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -113,7 +113,7 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# [함수] 프롬프트 생성기 (핵심)
+# [함수] 프롬프트 생성기 (사용자 요청사항 완벽 반영)
 # ---------------------------------------------------------
 def make_prompt(df, trends, ratio, walls, my_price):
     curr = df.iloc[-1]
@@ -121,43 +121,64 @@ def make_prompt(df, trends, ratio, walls, my_price):
     curr_price = curr['close']
     major_asks, major_bids = walls
     
+    # [BTC 데이터 확보] 넓은 맥락 분석용 (에러 시 0 처리)
+    try:
+        btc_ticker = exchange.fetch_ticker("BTC/KRW")
+        btc_price_str = f"{btc_ticker['last']:,.0f}"
+        btc_change_str = f"{btc_ticker['percentage']:.2f}"
+    except:
+        btc_price_str = "확인 불가"
+        btc_change_str = "0.00"
+
     asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
     bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
     
-    # 평단가 유무에 따른 전략 분기
+    # 평단가 유무에 따른 전략 컨텍스트
     if my_price > 0:
         pnl_rate = ((curr_price - my_price) / my_price) * 100
-        strategy_context = f"""
-        [사용자 상황 (보유중)]
-        - 평단가: {my_price:,.0f}원
+        user_position = f"""
+        - 사용자 상태: 보유 중 (평단가 {my_price:,.0f}원)
         - 현재 수익률: {pnl_rate:.2f}%
-        - 미션: 현재 구간에서 '홀딩', '불타기(추가매수)', '부분 익절', '전량 손절' 중 가장 확률 높은 대응책을 제시하시오.
         """
     else:
-        strategy_context = f"""
-        [사용자 상황 (신규 진입)]
-        - 현재 포지션 없음
-        - 미션: 지금 진입해도 되는 자리인가? 가장 안전한 진입 타점과 손익비(Risk/Reward)가 좋은 구간을 제시하시오.
+        user_position = """
+        - 사용자 상태: 신규 진입 대기 (현재 포지션 없음)
+        - 평단가 평가: 0원 (신규 진입 모드로 분석할 것)
         """
 
+    # [핵심] 사용자가 요청한 월가 헤지펀드 트레이더 페르소나 프롬프트
     return f"""
-    당신은 월가 출신의 냉철한 크립토 헤지펀드 매니저입니다. 
-    단순한 지표 해석을 넘어, 세력의 의도와 시장 심리를 꿰뚫어 보고 실전 매매 전략을 수립하십시오.
+    1. 역할 설정 (Role)
+    "당신은 월가 출신의 냉철한 크립토 헤지펀드 시니어 트레이더입니다. 절대 감정에 휩쓸리지 않으며, 확률과 리스크 관리에 기반한 냉철한 의사결정을 중시합니다."
 
-    [시장 데이터]
-    1. 추세: 24시간({trends[24]['change']:.2f}%), 6시간({trends[6]['change']:.2f}%), 3시간({trends[3]['change']:.2f}%), 1시간({trends[1]['change']:.2f}%)
-    2. 호가창 심리: 매수세 강도 {ratio:.0f}% (100% 초과시 매수우위)
+    2. 배경 및 목표 컨텍스트 (Context)
+    - 포트폴리오 제약: "이 분석은 총 포트폴리오의 5% 미만을 차지하는 XRP 포지션에 대한 것으로, 단일 종목 최대 허용 손실은 -2%입니다."
+    - 거래 스타일: "분석의 주요 시간대(Time Frame)는 4시간 차트이며, 이는 3~7일을 목표로 하는 스윙 트레이딩 관점입니다." (참고: 제공된 데이터는 실시간 타점용이므로 이를 스윙 관점에 맞춰 해석하십시오.)
+
+    3. 업그레이드된 입력 데이터 (Enhanced Input Data)
+    [시장 데이터 - XRP]
+    - 추세: 24시간({trends[24]['change']:.2f}%), 6시간({trends[6]['change']:.2f}%), 3시간({trends[3]['change']:.2f}%), 1시간({trends[1]['change']:.2f}%)
+    - 호가창 심리: 매수세 강도 {ratio:.0f}% (100% 초과시 매수우위)
        - 저항벽(매도): {asks_str}
        - 지지벽(매수): {bids_str}
-    3. 보조지표: RSI({last['rsi']:.1f}), MACD({last['macd_hist']:.2f})
-    4. 현재가: {curr['close']:.0f}원
+    - 보조지표: RSI({last['rsi']:.1f}), MACD({last['macd_hist']:.2f})
+    - 현재가: {curr['close']:.0f}원
 
-    {strategy_context}
+    [넓은 맥락 (Market Context)]
+    - 비트코인 현재가: {btc_price_str}원
+    - 24시간 변동: {btc_change_str}%
+    - 전체 암호화폐 시장 공포/탐욕 지수: [실시간 데이터 확인 필요] (이 부분은 당신이 지식 베이스를 활용하거나, 불확실하면 '확인 필요'로 표시하고 보수적으로 평가하시오.)
+    - 이 맥락에서 XRP의 상대적 강약을 평가하시오.
 
-    위 정보를 종합하여 다음 양식으로 리포트를 작성하시오:
+    [사용자 포지션 정보]
+    {user_position}
+
+    4. 출력 지시 (Output Instruction)
+    보고서 양식: 아래의 양식을 그대로 사용하되, 세부 내용에 리스크 관리 원칙과 시장 맥락이 반영되어야 합니다.
+    명확한 부재 정보 언급 요청: "당신이 충분한 정보를 가지고 있지 않거나 실시간 데이터가 필요한 부분은 명시적으로 '확인 필요'라고 표시하시오."
 
     ### 1. 🔍 세력 의도 및 시황 분석
-    (현재 횡보/상승/하락의 원인과 세력이 개미를 털어내는지, 매집하는지 분석)
+    (비트코인 흐름 대비 XRP의 강세/약세 판단, 세력의 매집/분산 여부)
 
     ### 2. 🛡️ 주요 지지 및 저항 라인
     - 강력 저항(뚫기 힘든 곳): OOO원
@@ -166,10 +187,11 @@ def make_prompt(df, trends, ratio, walls, my_price):
     ### 3. ♟️ 실전 매매 전략 (결론)
     - **추천 포지션**: (예: 강력 홀딩 / 눌림목 매수 / 즉시 탈출 등)
     - **대응 가이드**: 
-      (평단가 보유자면 어떻게 할지, 신규면 언제 들어갈지 구체적 가격 제시)
-    - **손절 라인**: OOO원 이탈 시 뒤도 돌아보지 말고 매도
+      (평단가 보유자는 수익 실현/손절 기준, 신규 진입자는 진입가 제시)
+    - **손절 라인**: (포트폴리오 제약 -2% 룰을 고려하여 구체적 가격 제시)
 
-    잡담은 생략하고 핵심만 굵고 짧게 전달하십시오.
+    5. 전문가적 촉구 (Final Nudge)
+    "전문용어를 사용해도 좋으니, 상투적 조언은 배제하고 확률이 높은 시나리오와 냉철한 전략만을 제시하십시오."
     """
 
 # ---------------------------------------------------------
@@ -298,7 +320,6 @@ try:
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                     st.session_state['report_model'] = "gemini-2.5-flash"
                     st.session_state['cnt_model_25'] += 1
-                    # 프롬프트 화면은 초기화
                     st.session_state['generated_prompt'] = ""
                     st.rerun()
             else:
@@ -315,7 +336,6 @@ try:
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                     st.session_state['report_model'] = "gemini-2.5-flash-lite"
                     st.session_state['cnt_model_25_lite'] += 1
-                    # 프롬프트 화면은 초기화
                     st.session_state['generated_prompt'] = ""
                     st.rerun()
             else:
@@ -327,11 +347,10 @@ try:
         st.caption("DeepSeek/ChatGPT용")
         if st.button("프롬프트 생성", use_container_width=True):
             st.session_state['generated_prompt'] = prompt_text
-            # 기존 리포트 화면은 가림
             st.session_state['ai_report'] = None 
             st.rerun()
 
-    # 결과 화면 분기 (AI 리포트 vs 프롬프트 코드)
+    # 결과 화면 분기
     if st.session_state['ai_report']:
         st.markdown("---")
         st.subheader(f"📢 분석 결과 ({st.session_state['report_model']})")
