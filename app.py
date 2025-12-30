@@ -4,6 +4,8 @@ import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
 import time
+import requests
+import json
 from datetime import datetime, timedelta
 import google.generativeai as genai
 
@@ -11,17 +13,21 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.0 - 스미마셍)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.1 - DeepSeek Added)")
 
 # ---------------------------------------------------------
-# [보안] 구글 API 키 로드
+# [보안] API 키 로드
 # ---------------------------------------------------------
+# 1. Google Gemini
 try:
     API_KEY = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=API_KEY)
 except Exception as e:
-    st.error("🚨 API 키 오류. Streamlit Secrets에 'GOOGLE_API_KEY'를 확인하세요.")
+    st.error("🚨 구글 API 키 오류. Streamlit Secrets를 확인하세요.")
     st.stop()
+
+# 2. DeepSeek (사용자 제공 키)
+DEEPSEEK_API_KEY = "sk-96b4e887532644eab93969260a4ac343"
 
 # ---------------------------------------------------------
 # [유틸] 한국 시간(KST) 구하기
@@ -30,25 +36,26 @@ def get_kst_now():
     return datetime.utcnow() + timedelta(hours=9)
 
 # ---------------------------------------------------------
-# [상태 관리] 세션 초기화 (RPD 카운터 + 날짜 추적)
+# [상태 관리] 세션 초기화
 # ---------------------------------------------------------
 if 'ai_report' not in st.session_state: st.session_state['ai_report'] = None
 if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 if 'report_model' not in st.session_state: st.session_state['report_model'] = ""
 
-# 카운터 초기화 (2.5 Flash, 2.5 Lite만 유지)
+# 카운터 초기화 (Gemini 2개 + DeepSeek 1개)
 if 'cnt_model_25' not in st.session_state: st.session_state['cnt_model_25'] = 0
 if 'cnt_model_25_lite' not in st.session_state: st.session_state['cnt_model_25_lite'] = 0
+if 'cnt_deepseek' not in st.session_state: st.session_state['cnt_deepseek'] = 0
 
 # [자동 초기화] 날짜 변경 감지
 current_date_str = get_kst_now().strftime("%Y-%m-%d")
 if 'last_run_date' not in st.session_state:
     st.session_state['last_run_date'] = current_date_str
 
-# 저장된 날짜와 현재 날짜가 다르면 (자정이 지났으면) 리셋
 if st.session_state['last_run_date'] != current_date_str:
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
+    st.session_state['cnt_deepseek'] = 0
     st.session_state['last_run_date'] = current_date_str
     st.toast("📅 날짜가 변경되어 API 사용량이 초기화되었습니다!")
 
@@ -64,7 +71,7 @@ st.sidebar.header("💼 내 자산 설정")
 my_avg_price = st.sidebar.number_input("내 평단가 (원)", min_value=0.0, step=1.0, format="%.0f", help="0 입력 시 신규 진입 관점")
 
 # ---------------------------------------------------------
-# [사이드바] API 사용량 현황 (RPD Checker)
+# [사이드바] API 사용량 현황
 # ---------------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.header("📊 AI 사용량 (RPD)")
@@ -74,19 +81,20 @@ def draw_rpd(label, count, max_val=20):
     st.write(f"**{label}** ({count}/{max_val})")
     st.progress(min(count / max_val, 1.0))
 
-# 사용자님이 요청하신 이름 그대로 표시
 draw_rpd("gemini-2.5-flash", st.session_state['cnt_model_25'])
 draw_rpd("gemini-2.5-flash-lite", st.session_state['cnt_model_25_lite'])
+draw_rpd("DeepSeek-V3", st.session_state['cnt_deepseek'])
 
 if st.sidebar.button("강제 초기화"):
     st.session_state['cnt_model_25'] = 0
     st.session_state['cnt_model_25_lite'] = 0
+    st.session_state['cnt_deepseek'] = 0
     st.rerun()
 
 exchange = ccxt.upbit()
 
 # ---------------------------------------------------------
-# [함수] 데이터 수집 및 처리
+# [함수] 데이터 수집
 # ---------------------------------------------------------
 def get_all_data():
     ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
@@ -114,88 +122,115 @@ def get_major_walls(orderbook):
     return asks_sorted, bids_sorted
 
 # ---------------------------------------------------------
-# [핵심] AI 분석 함수 (절대 매핑 금지, 직통 호출)
+# [함수] DeepSeek 분석 (New)
 # ---------------------------------------------------------
-def ask_gemini(df, trends, ratio, walls, my_price=0, model_name="gemini-2.5-flash-lite"):
+def ask_deepseek(prompt_text):
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": "You are a professional crypto trader."},
+            {"role": "user", "content": prompt_text}
+        ],
+        "stream": False
+    }
     try:
-        curr = df.iloc[-1]
-        last = df.iloc[-2]
-        curr_price = curr['close']
-        major_asks, major_bids = walls
-        
-        asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
-        bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
-        
-        if my_price > 0:
-            pnl_rate = ((curr_price - my_price) / my_price) * 100
-            strategy_context = f"""
-            [사용자 상황 (보유중)]
-            - 평단가: {my_price:,.0f}원
-            - 현재 수익률: {pnl_rate:.2f}%
-            - 미션: 현재 구간에서 '홀딩', '불타기(추가매수)', '부분 익절', '전량 손절' 중 가장 확률 높은 대응책을 제시하시오.
-            """
+        response = requests.post(url, headers=headers, data=json.dumps(data))
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
         else:
-            strategy_context = f"""
-            [사용자 상황 (신규 진입)]
-            - 현재 포지션 없음
-            - 미션: 지금 진입해도 되는 자리인가? 가장 안전한 진입 타점과 손익비(Risk/Reward)가 좋은 구간을 제시하시오.
-            """
+            return f"Error: {response.status_code} - {response.text}"
+    except Exception as e:
+        return f"DeepSeek 호출 오류: {e}"
 
-        prompt = f"""
-        당신은 월가 출신의 냉철한 크립토 헤지펀드 매니저입니다. 
-        단순한 지표 해석을 넘어, 세력의 의도와 시장 심리를 꿰뚫어 보고 실전 매매 전략을 수립하십시오.
-
-        [시장 데이터]
-        1. 추세: 24시간({trends[24]['change']:.2f}%), 3시간({trends[3]['change']:.2f}%)
-        2. 호가창 심리: 매수세 강도 {ratio:.0f}% (100% 초과시 매수우위)
-           - 저항벽(매도): {asks_str}
-           - 지지벽(매수): {bids_str}
-        3. 보조지표: RSI({last['rsi']:.1f}), MACD({last['macd_hist']:.2f})
-        4. 현재가: {curr['close']:.0f}원
-
-        {strategy_context}
-
-        위 정보를 종합하여 다음 양식으로 리포트를 작성하시오:
-
-        ### 1. 🔍 세력 의도 및 시황 분석
-        (현재 횡보/상승/하락의 원인과 세력이 개미를 털어내는지, 매집하는지 분석)
-
-        ### 2. 🛡️ 주요 지지 및 저항 라인
-        - 강력 저항(뚫기 힘든 곳): OOO원
-        - 강력 지지(받아줄 곳): OOO원
-
-        ### 3. ♟️ 실전 매매 전략 (결론)
-        - **추천 포지션**: (예: 강력 홀딩 / 눌림목 매수 / 즉시 탈출 등)
-        - **대응 가이드**: 
-          (평단가 보유자면 어떻게 할지, 신규면 언제 들어갈지 구체적 가격 제시)
-        - **손절 라인**: OOO원 이탈 시 뒤도 돌아보지 말고 매도
-
-        잡담은 생략하고 핵심만 굵고 짧게 전달하십시오.
-        """
-        
-        # [절대 수정 금지] 매핑 없이 사용자님이 지정한 문자열 그대로 호출
+# ---------------------------------------------------------
+# [함수] Gemini 분석 (Existing)
+# ---------------------------------------------------------
+def ask_gemini(prompt_text, model_name="gemini-2.5-flash-lite"):
+    try:
         model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
+        response = model.generate_content(prompt_text)
         return response.text
     except Exception as e:
-        return f"🚨 AI 분석 오류: {e} (호출한 모델명: {model_name})"
+        return f"🚨 AI 분석 오류: {e}"
+
+# 프롬프트 생성 함수 (공통 사용)
+def make_prompt(df, trends, ratio, walls, my_price):
+    curr = df.iloc[-1]
+    last = df.iloc[-2]
+    curr_price = curr['close']
+    major_asks, major_bids = walls
+    
+    asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
+    bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
+    
+    if my_price > 0:
+        pnl_rate = ((curr_price - my_price) / my_price) * 100
+        strategy_context = f"""
+        [사용자 상황 (보유중)]
+        - 평단가: {my_price:,.0f}원
+        - 현재 수익률: {pnl_rate:.2f}%
+        - 미션: 현재 구간에서 '홀딩', '불타기(추가매수)', '부분 익절', '전량 손절' 중 가장 확률 높은 대응책을 제시하시오.
+        """
+    else:
+        strategy_context = f"""
+        [사용자 상황 (신규 진입)]
+        - 현재 포지션 없음
+        - 미션: 지금 진입해도 되는 자리인가? 가장 안전한 진입 타점과 손익비(Risk/Reward)가 좋은 구간을 제시하시오.
+        """
+
+    return f"""
+    당신은 월가 출신의 냉철한 크립토 헤지펀드 매니저입니다. 
+    단순한 지표 해석을 넘어, 세력의 의도와 시장 심리를 꿰뚫어 보고 실전 매매 전략을 수립하십시오.
+
+    [시장 데이터]
+    1. 추세: 24시간({trends[24]['change']:.2f}%), 6시간({trends[6]['change']:.2f}%), 3시간({trends[3]['change']:.2f}%), 1시간({trends[1]['change']:.2f}%)
+    2. 호가창 심리: 매수세 강도 {ratio:.0f}% (100% 초과시 매수우위)
+       - 저항벽(매도): {asks_str}
+       - 지지벽(매수): {bids_str}
+    3. 보조지표: RSI({last['rsi']:.1f}), MACD({last['macd_hist']:.2f})
+    4. 현재가: {curr['close']:.0f}원
+
+    {strategy_context}
+
+    위 정보를 종합하여 다음 양식으로 리포트를 작성하시오:
+
+    ### 1. 🔍 세력 의도 및 시황 분석
+    (현재 횡보/상승/하락의 원인과 세력이 개미를 털어내는지, 매집하는지 분석)
+
+    ### 2. 🛡️ 주요 지지 및 저항 라인
+    - 강력 저항(뚫기 힘든 곳): OOO원
+    - 강력 지지(받아줄 곳): OOO원
+
+    ### 3. ♟️ 실전 매매 전략 (결론)
+    - **추천 포지션**: (예: 강력 홀딩 / 눌림목 매수 / 즉시 탈출 등)
+    - **대응 가이드**: 
+      (평단가 보유자면 어떻게 할지, 신규면 언제 들어갈지 구체적 가격 제시)
+    - **손절 라인**: OOO원 이탈 시 뒤도 돌아보지 말고 매도
+
+    잡담은 생략하고 핵심만 굵고 짧게 전달하십시오.
+    """
 
 # ---------------------------------------------------------
 # [함수] 상세 추세 요약
 # ---------------------------------------------------------
 def get_detailed_trend_summary(trends):
     c24 = trends[24]['change']
-    c3 = trends[3]['change']
+    c1 = trends[1]['change']
     
-    if abs(c24) < 1.0 and abs(c3) < 1.0:
+    if abs(c24) < 1.0 and abs(c1) < 1.0:
         return "💤 **횡보장**: 뚜렷한 방향성 없이 세력이 간보는 중입니다. 박스권 매매 유효."
-    elif c24 > 0 and c3 > 0:
+    elif c24 > 0 and c1 > 0:
         return "🚀 **강력 상승장**: 장/단기 모두 상승세. 추격 매수보다 눌림목을 노리세요."
-    elif c24 > 0 and c3 < 0:
+    elif c24 > 0 and c1 < 0:
         return "💎 **눌림목 구간**: 상승 추세 중 단기 조정입니다. 매수 기회일 수 있습니다."
-    elif c24 < 0 and c3 < 0:
+    elif c24 < 0 and c1 < 0:
         return "🌊 **하락장**: 장/단기 모두 하락세. 바닥 잡지 말고 관망하십시오."
-    elif c24 < 0 and c3 > 0:
+    elif c24 < 0 and c1 > 0:
         return "⚠️ **기술적 반등**: 하락 중 일시적 반등(데드캣)일 수 있습니다. 짧게 드세요."
     else:
         return "⚖️ **혼조세**: 방향 탐색 구간입니다. 보수적 접근 필요."
@@ -208,14 +243,14 @@ try:
     curr = df.iloc[-1]
     curr_price = float(curr['close'])
     
-    # 추세 계산
-    trend_curr = df_trend['close'].iloc[-1]
+    # [수정] 추세 계산 (24, 6, 3, 1시간 전 대비)
     trends = {}
-    periods = {3: -4, 24: -25}
+    periods = {1: -2, 3: -4, 6: -7, 24: -25} # 1h봉 기준 인덱스
+    
     for h, idx in periods.items():
         if len(df_trend) > abs(idx):
             past_price = df_trend['close'].iloc[idx]
-            change_rate = ((trend_curr - past_price) / past_price) * 100
+            change_rate = ((curr_price - past_price) / past_price) * 100 # 현재가 기준 변동률
             trends[h] = {'price': past_price, 'change': change_rate}
         else:
             trends[h] = {'price': 0, 'change': 0.0}
@@ -228,14 +263,17 @@ try:
     kst_now_str = get_kst_now().strftime('%H:%M:%S')
 
     # -----------------------------------------------------
-    # [섹션 1] 장기 추세
+    # [섹션 1] 장기 추세 (요청하신 대로 수정됨)
     # -----------------------------------------------------
-    st.markdown("### 🗓️ 시간별 추세 요약")
+    st.markdown("### 🗓️ 시간별 추세 요약 (현재가 기준 변동률)")
     st.info(get_detailed_trend_summary(trends))
     
-    col_t1, col_t2 = st.columns(2)
-    col_t1.metric("24시간 변동", f"{trends[24]['change']:.2f}%")
-    col_t2.metric("3시간 변동", f"{trends[3]['change']:.2f}%")
+    # 24, 6, 3, 1 시간 전 가격과 변동률 표시
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("24시간 전", f"{trends[24]['price']:,.0f}원", f"{trends[24]['change']:.2f}%")
+    t2.metric("6시간 전", f"{trends[6]['price']:,.0f}원", f"{trends[6]['change']:.2f}%")
+    t3.metric("3시간 전", f"{trends[3]['price']:,.0f}원", f"{trends[3]['change']:.2f}%")
+    t4.metric("1시간 전", f"{trends[1]['price']:,.0f}원", f"{trends[1]['change']:.2f}%")
     st.divider()
 
     # -----------------------------------------------------
@@ -267,51 +305,68 @@ try:
             st.progress(min(v / (major_bids[0][1]*1.2), 1.0))
 
     # -----------------------------------------------------
-    # [섹션 4] AI 전략 분석 센터 (2 Model Only)
+    # [섹션 4] AI 전략 분석 센터 (Gemini + DeepSeek)
     # -----------------------------------------------------
     st.divider()
     st.markdown("### 🧠 AI 전략 분석 센터")
-    st.caption("※ 각 모델별로 하루 20회 분석 가능합니다.")
+    st.caption("※ Gemini는 기존 모델, DeepSeek는 새로 추가된 추론 모델입니다.")
 
     if my_avg_price > 0:
         st.success(f"📌 **평단가 {my_avg_price:,.0f}원** 기준 맞춤 전략을 생성합니다.")
     else:
         st.info("📌 **신규 진입** 관점에서 전략을 생성합니다.")
 
-    # 2개의 컬럼으로 버튼 분리 (깔끔하게 좌우 배치)
-    mb1, mb2 = st.columns(2)
+    # 공통 프롬프트 생성
+    common_prompt = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price)
+
+    # 3개의 컬럼으로 버튼 분리 (Gemini 2개 + DeepSeek 1개)
+    mb1, mb2, mb3 = st.columns(3)
     
-    # 모델 1: gemini-2.5-flash (직접 호출)
+    # 모델 1: Gemini 2.5 Flash
     with mb1:
-        st.markdown("##### 🧠 gemini-2.5-flash")
+        st.markdown("##### 🧠 Gemini 2.5 Flash")
         if st.button("분석 실행 (Flash)", type="primary", use_container_width=True):
             if st.session_state['cnt_model_25'] < 20:
                 with st.spinner("Gemini 2.5-Flash 분석 중..."):
-                    # 매핑 없이 바로 문자열 전송
-                    report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash")
+                    report = ask_gemini(common_prompt, "gemini-2.5-flash")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                     st.session_state['report_model'] = "gemini-2.5-flash"
                     st.session_state['cnt_model_25'] += 1
                     st.rerun()
             else:
-                st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
+                st.error("오늘치 사용량 소진")
 
-    # 모델 2: gemini-2.5-flash-lite (직접 호출)
+    # 모델 2: Gemini 2.5 Lite
     with mb2:
-        st.markdown("##### 🚀 gemini-2.5-flash-lite")
+        st.markdown("##### 🚀 Gemini 2.5 Lite")
         if st.button("분석 실행 (Lite)", use_container_width=True):
             if st.session_state['cnt_model_25_lite'] < 20:
                 with st.spinner("Gemini 2.5-Lite 분석 중..."):
-                    # 매핑 없이 바로 문자열 전송
-                    report = ask_gemini(df, trends, ratio, (major_asks, major_bids), my_avg_price, "gemini-2.5-flash-lite")
+                    report = ask_gemini(common_prompt, "gemini-2.5-flash-lite")
                     st.session_state['ai_report'] = report
                     st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
                     st.session_state['report_model'] = "gemini-2.5-flash-lite"
                     st.session_state['cnt_model_25_lite'] += 1
                     st.rerun()
             else:
-                st.error("오늘치 사용량(20회)을 모두 소진했습니다.")
+                st.error("오늘치 사용량 소진")
+
+    # 모델 3: DeepSeek (NEW)
+    with mb3:
+        st.markdown("##### 🐳 DeepSeek V3")
+        st.caption("New! 딥시크 추론")
+        if st.button("분석 실행 (DeepSeek)", use_container_width=True):
+            if st.session_state['cnt_deepseek'] < 20:
+                with st.spinner("DeepSeek가 분석 중입니다..."):
+                    report = ask_deepseek(common_prompt)
+                    st.session_state['ai_report'] = report
+                    st.session_state['report_time'] = get_kst_now().strftime("%H:%M:%S")
+                    st.session_state['report_model'] = "DeepSeek-V3"
+                    st.session_state['cnt_deepseek'] += 1
+                    st.rerun()
+            else:
+                st.error("오늘치 사용량 소진")
 
     # 분석 결과 출력 공간
     if st.session_state['ai_report']:
