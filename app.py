@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.5 - Pro Data Pack)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.6 - Binance OI Added)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -82,36 +82,45 @@ if st.sidebar.button("강제 초기화"):
     st.session_state['cnt_model_25_lite'] = 0
     st.rerun()
 
+# ---------------------------------------------------------
+# [API 연결] 업비트(Key 필요없음) & 바이낸스(Key 필요없음)
+# ---------------------------------------------------------
 exchange = ccxt.upbit()
+# 바이낸스 선물(Futures) 시장 연결 (키 없이 공용 데이터 조회)
+binance = ccxt.binance({
+    'options': {
+        'defaultType': 'future' 
+    }
+})
 
 # ---------------------------------------------------------
-# [함수] 데이터 수집 (Pro Data 추가)
+# [함수] 데이터 수집 (Binance Data 추가)
 # ---------------------------------------------------------
 def get_all_data():
-    # 1. 기본 OHLCV
+    # 1. 업비트 기본 OHLCV
     ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
     
-    # 2. 보조지표 (ATR, BB Width 추가)
+    # 2. 보조지표
     df['rsi'] = ta.rsi(df['close'], length=14)
     bb = ta.bbands(df['close'], length=20, std=2)
     df['bb_lower'] = bb.iloc[:, 0]
     df['bb_mid'] = bb.iloc[:, 1]
     df['bb_upper'] = bb.iloc[:, 2]
-    df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / df['bb_mid']) * 100 # BB 폭(%)
+    df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / df['bb_mid']) * 100
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     df['macd_hist'] = macd.iloc[:, 1]
     
-    # 3. 추세 데이터 (1시간봉)
+    # 3. 추세 데이터
     ohlcv_trend = exchange.fetch_ohlcv("XRP/KRW", "1h", limit=30)
     df_trend = pd.DataFrame(ohlcv_trend, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
-    # 4. 호가창 (Extended)
+    # 4. 호가창
     orderbook = exchange.fetch_order_book("XRP/KRW")
     
-    # 5. [NEW] 최근 체결 내역 (Order Flow 분석용) - 최근 100개
+    # 5. 최근 체결 내역
     try:
         trades = exchange.fetch_trades("XRP/KRW", limit=100)
     except:
@@ -119,27 +128,33 @@ def get_all_data():
         
     return df, df_trend, orderbook, trades
 
+# [NEW] 바이낸스 선물 데이터 가져오기 (OI, Funding Rate)
+def get_binance_futures_data():
+    try:
+        # 미체결 약정 (Open Interest) - XRP/USDT
+        ticker = binance.fetch_ticker("XRP/USDT")
+        oi_data = binance.fetch_open_interest("XRP/USDT")
+        funding_data = binance.fetch_funding_rate("XRP/USDT")
+        
+        # 데이터 정리
+        global_price = ticker['last'] # 달러 가격
+        open_interest = oi_data['openInterestAmount'] # 계약 수
+        funding_rate = funding_data['fundingRate'] * 100 # %로 변환
+        
+        return global_price, open_interest, funding_rate
+    except Exception as e:
+        # 에러나면 0으로 처리 (프로그램 멈춤 방지)
+        return 0, 0, 0
+
 def get_major_walls(orderbook):
     asks_sorted = sorted(orderbook['asks'], key=lambda x: x[1], reverse=True)[:3]
     bids_sorted = sorted(orderbook['bids'], key=lambda x: x[1], reverse=True)[:3]
     return asks_sorted, bids_sorted
 
-# [NEW] BTC 데이터 가져오기 (상대 강도 분석용)
-def get_btc_data():
-    try:
-        ticker = exchange.fetch_ticker("BTC/KRW")
-        ohlcv = exchange.fetch_ohlcv("BTC/KRW", timeframe, limit=14) # RSI용
-        df_btc = pd.DataFrame(ohlcv, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-        btc_rsi = ta.rsi(df_btc['c'], length=14).iloc[-1]
-        return ticker['last'], ticker['percentage'], btc_rsi
-    except:
-        return 0, 0, 50
-
-# [NEW] 체결 데이터 분석 (순체결량, 고래 포착)
 def analyze_trade_flow(trades, current_price):
     buy_vol = 0
     sell_vol = 0
-    large_trades = [] # 1억 이상
+    large_trades = []
     
     for t in trades:
         cost = t['price'] * t['amount']
@@ -148,7 +163,7 @@ def analyze_trade_flow(trades, current_price):
         else:
             sell_vol += t['amount']
             
-        if cost >= 100000000: # 1억
+        if cost >= 100000000:
             large_trades.append(f"{t['side'].upper()} {t['price']:,.0f}원({cost/100000000:.1f}억)")
             
     net_vol = buy_vol - sell_vol
@@ -158,77 +173,71 @@ def analyze_trade_flow(trades, current_price):
     return net_vol, buy_ratio, large_trades
 
 # ---------------------------------------------------------
-# [함수] 프롬프트 생성기 (헤지펀드 스타일 JSON 반영)
+# [함수] 프롬프트 생성기 (바이낸스 데이터 통합)
 # ---------------------------------------------------------
-def make_prompt(df, trends, ratio, walls, my_price, trades_data, btc_data):
+def make_prompt(df, trends, ratio, walls, my_price, trades_data, binance_data):
     curr = df.iloc[-1]
     last = df.iloc[-2]
     curr_price = curr['close']
     
     major_asks, major_bids = walls
     net_vol, buy_ratio, large_trades = trades_data
-    btc_price, btc_change, btc_rsi = btc_data
     
-    # 파생 데이터 계산
-    xrp_btc_ratio = curr_price / btc_price if btc_price > 0 else 0
-    xrp_btc_rsi_diff = curr['rsi'] - btc_rsi # 양수면 XRP가 더 강세
+    # [NEW] 바이낸스 데이터 해체
+    bn_price, bn_oi, bn_funding = binance_data
+    
+    # 김치 프리미엄 대략 계산 (환율 1450원 가정 - 실제 API 연동은 복잡하므로 고정값 사용하거나 추후 보완)
+    # 여기서는 "글로벌 가격(달러)"만 제공하여 AI가 판단하게 함
     
     asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
     bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
     large_trades_str = ", ".join(large_trades) if large_trades else "없음"
     
-    # 사용자 포지션
     if my_price > 0:
         pnl_rate = ((curr_price - my_price) / my_price) * 100
         user_context = f"보유 중 (평단: {my_price:,.0f}원, 수익률: {pnl_rate:.2f}%)"
     else:
         user_context = "신규 진입 대기 (Risk Free)"
 
-    # [핵심] JSON 포맷 기반의 강력한 프롬프트
     return f"""
-    당신은 업비트 API를 활용해 암호화폐 시장 데이터를 전문적으로 분석하는 데이터 엔지니어이자 월가 출신 트레이더입니다.
-    아래 수집된 심화 데이터를 바탕으로 XRP 매매 전략을 수립하십시오.
+    1. 역할 설정 (Role)
+    "당신은 월가 출신의 냉철한 크립토 헤지펀드 시니어 트레이더입니다. 절대 감정에 휩쓸리지 않으며, 확률과 리스크 관리에 기반한 냉철한 의사결정을 중시합니다."
 
-    [1. 📋 핵심 데이터 수집 결과]
+    2. 배경 및 목표 컨텍스트 (Context)
+    - 포트폴리오 제약: "이 분석은 총 포트폴리오의 5% 미만을 차지하는 XRP 포지션에 대한 것으로, 단일 종목 최대 허용 손실은 -2%입니다."
+    - 거래 스타일: "분석의 주요 시간대(Time Frame)는 4시간 차트이며, 이는 3~7일을 목표로 하는 스윙 트레이딩 관점입니다."
+
+    3. 업그레이드된 입력 데이터 (Enhanced Input Data)
+    [시장 데이터 - XRP(Upbit)]
+    - 현재가: {curr_price:,.0f}원 (RSI: {curr['rsi']:.1f}, ATR: {curr['atr']:.1f})
+    - 추세 변동: 24H({trends[24]['change']:.2f}%) / 6H({trends[6]['change']:.2f}%) / 3H({trends[3]['change']:.2f}%)
+    - 수급: 순체결량 {net_vol:,.0f} / 매수강도 {buy_ratio:.1f}% / 매수벽 강도 {ratio:.0f}%
+    - 호가: 저항[{asks_str}] vs 지지[{bids_str}]
+
+    [글로벌 파생상품 데이터 - XRP/USDT(Binance Futures)]
+    - 글로벌 시세: ${bn_price:.4f} (김치프리미엄 고려 필요)
+    - **미체결 약정(OI)**: {bn_oi:,.0f} XRP (이 수치의 증감 추세는 직접적인 데이터가 없으므로, 가격 변동과 결합해 해석하시오. 예: 가격상승+OI증가=강세)
+    - **펀딩비(Funding Rate)**: {bn_funding:.4f}% (양수=롱우세/음수=숏우세)
+
+    [사용자 포지션]
+    - {user_context}
+
+    4. 출력 지시 (Output Instruction)
     
-    A. 가격/거래 심화 데이터
-    - 현재가: {curr_price:,.0f}원 (RSI: {curr['rsi']:.1f})
-    - 고빈도 체결 분석 (최근 100건):
-      · 순체결량(Net Volume): {net_vol:,.0f} XRP (양수=매수우위, 음수=매도우위)
-      · 체결 강도(매수비율): {buy_ratio:.1f}%
-      · 대량 거래(1억↑): {large_trades_str}
-    - 시장 깊이 (Top 3):
-      · 저항(Ask): {asks_str}
-      · 지지(Bid): {bids_str}
-      · 매수벽 강도: {ratio:.0f}%
-    
-    B. 변동성 및 리스크 지표
-    - 4시간 ATR(14): {curr['atr']:.1f} (스탑로스 범위 설정용)
-    - 볼린저밴드 폭(Width): {curr['bb_width']:.2f}% (수축/확장 여부 판단)
-    
-    C. 상대 강도 및 시장 구조
-    - BTC 현재가: {btc_price:,.0f}원 ({btc_change:.2f}%)
-    - XRP/BTC 상대강도: XRP RSI({curr['rsi']:.1f}) vs BTC RSI({btc_rsi:.1f}) (차이: {xrp_btc_rsi_diff:.1f})
-    - 추세 데이터: 24H({trends[24]['change']:.2f}%) / 6H({trends[6]['change']:.2f}%) / 3H({trends[3]['change']:.2f}%) / 1H({trends[1]['change']:.2f}%)
+    ### 1. 🔍 세력 의도 및 시황 분석
+    (Binance 펀딩비와 OI 데이터를 포함하여, 현재 시장이 과열인지 공포인지, 세력이 롱/숏 중 어디에 베팅하는지 분석)
 
-    [2. 👤 사용자 컨텍스트]
-    - 상태: {user_context}
-    - 목표: 스윙 트레이딩 (3~7일 보유 목표), 단일 종목 최대 손실 -2% 제한
+    ### 2. 🛡️ 주요 지지 및 저항 라인
+    - 강력 저항(뚫기 힘든 곳): OOO원
+    - 강력 지지(받아줄 곳): OOO원
 
-    [3. 🎯 트레이딩 인사이트 요청]
-    위 데이터를 바탕으로 다음 질문에 대한 명확한 답변을 제시하시오:
+    ### 3. ♟️ 실전 매매 전략 (결론)
+    - **추천 포지션**: (강력 홀딩 / 눌림목 매수 / 숏 헤징 / 관망 등)
+    - **대응 가이드**: (평단가 보유자 및 신규 진입자별 구체적 행동 지침)
+    - **스탑로스**: (ATR 기반 구체적 가격)
 
-    1. **유동성 추적**: 호가창과 대량 체결을 볼 때, 세력은 가격을 올리려 하는가, 누르고 있는가?
-    2. **시장 온도**: 체결 강도와 순체결량을 볼 때, 현재 매수세는 진성인가 허수인가?
-    3. **상대 강도**: XRP가 BTC 대비 강세인가, 단순히 시장 전반의 흐름을 따라가는 중인가?
-    4. **리스크 구간**: ATR을 기반으로 한 적정 스탑로스 가격은 얼마인가?
-
-    [4. ♟️ 최종 전략 (결론)]
-    - **포지션 제안**: (홀딩 / 비중 확대 / 부분 익절 / 전량 매도 / 신규 진입 / 관망)
-    - **진입/청산 타점**: (구체적 가격 제시)
-    - **스탑로스**: (평단가 및 ATR 고려하여 구체적 가격 제시)
-
-    잡담은 생략하고, 전문 트레이더의 보고서 형식으로 간결하고 냉철하게 작성하시오.
+    5. 전문가적 촉구 (Final Nudge)
+    "OI와 펀딩비를 통해 시장의 숨겨진 압력을 읽어내고, 가장 확률 높은 시나리오를 제시하십시오."
     """
 
 # ---------------------------------------------------------
@@ -266,9 +275,9 @@ def get_detailed_trend_summary(trends):
 # 메인 실행 로직
 # ---------------------------------------------------------
 try:
-    # 데이터 수집 (Pro Data 포함)
+    # 데이터 수집 (Binance 포함)
     df, df_trend, orderbook, trades = get_all_data()
-    btc_price, btc_change, btc_rsi = get_btc_data()
+    bn_price, bn_oi, bn_funding = get_binance_futures_data() # [NEW]
     net_vol, buy_ratio, large_trades = analyze_trade_flow(trades, df.iloc[-1]['close'])
     
     curr = df.iloc[-1]
@@ -305,15 +314,17 @@ try:
     st.divider()
 
     # -----------------------------------------------------
-    # [섹션 2] 단타 데이터 (Pro Data 추가)
+    # [섹션 2] 단타 데이터 & 바이낸스 지표
     # -----------------------------------------------------
-    st.markdown(f"### 🎯 실시간 타점 & Pro Data (기준: {kst_now_str})")
+    st.markdown(f"### 🎯 실시간 타점 & 파생상품 데이터 (기준: {kst_now_str})")
     k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("현재가", f"{curr_price:,.0f}원")
-    k2.metric("RSI (XRP/BTC)", f"{curr['rsi']:.1f} / {btc_rsi:.1f}")
-    k3.metric("ATR (변동폭)", f"{curr['atr']:.1f}")
-    k4.metric("체결 강도", f"{buy_ratio:.1f}%")
-    k5.metric("순체결량(100건)", f"{net_vol:,.0f} XRP")
+    k1.metric("현재가 (Upbit)", f"{curr_price:,.0f}원")
+    k2.metric("글로벌 (Binance)", f"${bn_price:.4f}")
+    k3.metric("미체결약정 (OI)", f"{bn_oi/1000000:.1f}M XRP")
+    k4.metric("펀딩비 (Funding)", f"{bn_funding:.4f}%")
+    k5.metric("순체결량 (Upbit)", f"{net_vol:,.0f} XRP")
+    
+    st.caption("※ 펀딩비 양수(+) = 롱 우세(상승심리), 음수(-) = 숏 우세(하락심리)")
     st.divider()
 
     # -----------------------------------------------------
@@ -337,15 +348,15 @@ try:
     # -----------------------------------------------------
     st.divider()
     st.markdown("### 🧠 AI 전략 분석 & 프롬프트 생성")
-    st.caption("※ API 호출 비용이 부담된다면, **'프롬프트 생성'**을 눌러 복사한 뒤 무료 AI에게 물어보세요.")
+    st.caption("※ 바이낸스 선물 데이터(OI, Funding)가 포함된 심층 분석입니다.")
 
     if my_avg_price > 0:
         st.success(f"📌 **평단가 {my_avg_price:,.0f}원** 기준 맞춤 전략을 생성합니다.")
     else:
         st.info("📌 **신규 진입** 관점에서 전략을 생성합니다.")
 
-    # 공통 프롬프트 준비 (Pro Data 반영)
-    prompt_text = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price, (net_vol, buy_ratio, large_trades), (btc_price, btc_change, btc_rsi))
+    # 공통 프롬프트 준비 (바이낸스 데이터 포함)
+    prompt_text = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price, (net_vol, buy_ratio, large_trades), (bn_price, bn_oi, bn_funding))
 
     # 3개의 컬럼 (Flash / Lite / Prompt Gen)
     mb1, mb2, mb3 = st.columns(3)
