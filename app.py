@@ -4,7 +4,6 @@ import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
 import time
-import requests
 from datetime import datetime, timedelta
 import google.generativeai as genai
 
@@ -12,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.5 - Hybrid Bypass)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.7 - Spot Flow)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -64,13 +63,6 @@ st.sidebar.markdown("---")
 st.sidebar.header("💼 내 자산 설정")
 my_avg_price = st.sidebar.number_input("내 평단가 (원)", min_value=0.0, step=1.0, format="%.0f", help="0 입력 시 신규 진입 관점")
 
-# [NEW] 선물 데이터 수동 보정 (Cloud 우회용)
-st.sidebar.markdown("---")
-st.sidebar.header("📝 선물 데이터 입력 (선택)")
-st.sidebar.caption("※ 서버 차단 우회용 (앱 보고 입력)")
-manual_oi = st.sidebar.number_input("미체결약정 (백만 단위)", min_value=0.0, step=0.1, format="%.1f", help="예: 450.5 입력 -> 450.5M")
-manual_funding = st.sidebar.number_input("펀딩비 (%)", min_value=-5.0, max_value=5.0, step=0.0001, format="%.4f")
-
 # ---------------------------------------------------------
 # [사이드바] API 사용량 현황
 # ---------------------------------------------------------
@@ -93,91 +85,98 @@ if st.sidebar.button("강제 초기화"):
 exchange = ccxt.upbit()
 
 # ---------------------------------------------------------
-# [함수] 데이터 수집
+# [함수] 데이터 수집 (Upbit Only)
 # ---------------------------------------------------------
 def get_all_data():
+    # 1. OHLCV
     ohlcv = exchange.fetch_ohlcv("XRP/KRW", timeframe, limit=200)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') + timedelta(hours=9)
     
+    # 2. 보조지표
     df['rsi'] = ta.rsi(df['close'], length=14)
     bb = ta.bbands(df['close'], length=20, std=2)
     df['bb_lower'] = bb.iloc[:, 0]
     df['bb_mid'] = bb.iloc[:, 1]
     df['bb_upper'] = bb.iloc[:, 2]
-    df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / df['bb_mid']) * 100
     df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     df['macd_hist'] = macd.iloc[:, 1]
     
+    # 3. 추세 데이터
     ohlcv_trend = exchange.fetch_ohlcv("XRP/KRW", "1h", limit=30)
     df_trend = pd.DataFrame(ohlcv_trend, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
+    # 4. 호가창
     orderbook = exchange.fetch_order_book("XRP/KRW")
     
+    # 5. 최근 체결 내역 (200개로 확장)
     try:
-        trades = exchange.fetch_trades("XRP/KRW", limit=100)
+        trades = exchange.fetch_trades("XRP/KRW", limit=200)
     except:
         trades = []
         
     return df, df_trend, orderbook, trades
-
-# [NEW] CoinGecko API (미국 서버 차단 안됨!)
-def get_global_price_coingecko():
-    try:
-        # CoinGecko는 별도 키 없이 호출 가능 (약간 느릴 수 있음)
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=ripple&vs_currencies=usd"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        price = data['ripple']['usd']
-        return price
-    except:
-        return 0.0
 
 def get_major_walls(orderbook):
     asks_sorted = sorted(orderbook['asks'], key=lambda x: x[1], reverse=True)[:3]
     bids_sorted = sorted(orderbook['bids'], key=lambda x: x[1], reverse=True)[:3]
     return asks_sorted, bids_sorted
 
-def analyze_trade_flow(trades, current_price):
+# [핵심] 현물 수급 심층 분석 함수 (대체 데이터 생성)
+def analyze_market_microstructure(trades, orderbook):
+    # 1. 고래 체결 카운트 (1억 이상)
+    whale_buy_count = 0
+    whale_sell_count = 0
+    
+    # 2. 순체결량 (Net Flow)
     buy_vol = 0
     sell_vol = 0
-    large_trades = []
     
     for t in trades:
         cost = t['price'] * t['amount']
         if t['side'] == 'buy':
             buy_vol += t['amount']
+            if cost >= 100000000: whale_buy_count += 1
         else:
             sell_vol += t['amount']
-            
-        if cost >= 100000000:
-            large_trades.append(f"{t['side'].upper()} {t['price']:,.0f}원({cost/100000000:.1f}억)")
+            if cost >= 100000000: whale_sell_count += 1
             
     net_vol = buy_vol - sell_vol
-    total_vol = buy_vol + sell_vol
-    buy_ratio = (buy_vol / total_vol * 100) if total_vol > 0 else 50
     
-    return net_vol, buy_ratio, large_trades
+    # 3. 호가 불균형 (Order Book Imbalance) - LP 의도 파악
+    # 상위 10호가 총 잔량 비교
+    total_bid_qty = sum([b[1] for b in orderbook['bids'][:10]])
+    total_ask_qty = sum([a[1] for a in orderbook['asks'][:10]])
+    
+    # 매수벽이 더 두터우면 > 100 (방어 심리), 매도벽이 두터우면 < 100 (저항 심리)
+    ob_ratio = (total_bid_qty / total_ask_qty * 100) if total_ask_qty > 0 else 0
+    
+    return {
+        'whale_buy': whale_buy_count,
+        'whale_sell': whale_sell_count,
+        'net_vol': net_vol,
+        'ob_ratio': ob_ratio,
+        'buy_vol': buy_vol,
+        'sell_vol': sell_vol
+    }
 
 # ---------------------------------------------------------
-# [함수] 프롬프트 생성기 (하이브리드 데이터 반영)
+# [함수] 프롬프트 생성기 (대체 데이터 반영)
 # ---------------------------------------------------------
-def make_prompt(df, trends, ratio, walls, my_price, trades_data, global_data, manual_data):
+def make_prompt(df, trends, walls, my_price, micro_data):
     curr = df.iloc[-1]
-    last = df.iloc[-2]
     curr_price = curr['close']
     
     major_asks, major_bids = walls
-    net_vol, buy_ratio, large_trades = trades_data
-    
-    # 데이터 조합
-    global_price = global_data
-    m_oi, m_funding = manual_data # 수동 입력 데이터
     
     asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
     bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
-    large_trades_str = ", ".join(large_trades) if large_trades else "없음"
+    
+    # 수급 데이터 해석 텍스트
+    whale_str = f"매수고래 {micro_data['whale_buy']}회 vs 매도고래 {micro_data['whale_sell']}회"
+    flow_str = f"{'매수우위' if micro_data['net_vol'] > 0 else '매도우위'} ({micro_data['net_vol']:,.0f} XRP)"
+    ob_status = "매수벽 두터움(지지)" if micro_data['ob_ratio'] > 100 else "매도벽 두터움(저항)"
     
     if my_price > 0:
         pnl_rate = ((curr_price - my_price) / my_price) * 100
@@ -187,44 +186,43 @@ def make_prompt(df, trends, ratio, walls, my_price, trades_data, global_data, ma
 
     return f"""
     1. 역할 설정 (Role)
-    "당신은 월가 출신의 냉철한 크립토 헤지펀드 시니어 트레이더입니다. 절대 감정에 휩쓸리지 않으며, 확률과 리스크 관리에 기반한 냉철한 의사결정을 중시합니다."
+    "당신은 월가 출신의 냉철한 크립토 헤지펀드 시니어 트레이더입니다. 선물 데이터(OI 등)의 부재를 '현물 오더플로우(Order Flow)' 분석으로 대체하여 판단합니다."
 
     2. 배경 및 목표 컨텍스트 (Context)
-    - 포트폴리오 제약: "이 분석은 총 포트폴리오의 5% 미만을 차지하는 XRP 포지션에 대한 것으로, 단일 종목 최대 허용 손실은 -2%입니다."
-    - 거래 스타일: "분석의 주요 시간대(Time Frame)는 4시간 차트이며, 이는 3~7일을 목표로 하는 스윙 트레이딩 관점입니다."
+    - 포트폴리오 제약: "단일 종목 최대 허용 손실은 -2%입니다."
+    - 분석 방식: "선물 데이터가 없으므로, 업비트의 호가창과 체결창 데이터를 통해 세력의 의도(Microstructure)를 파악하십시오."
 
-    3. 업그레이드된 입력 데이터 (Enhanced Input Data)
-    [시장 데이터 - XRP(Upbit)]
+    3. 업그레이드된 입력 데이터 (Spot Market Microstructure)
+    [가격 및 추세]
     - 현재가: {curr_price:,.0f}원 (RSI: {curr['rsi']:.1f}, ATR: {curr['atr']:.1f})
     - 추세 변동: 24H({trends[24]['change']:.2f}%) / 6H({trends[6]['change']:.2f}%) / 3H({trends[3]['change']:.2f}%)
-    - 수급: 순체결량 {net_vol:,.0f} / 매수강도 {buy_ratio:.1f}% / 매수벽 강도 {ratio:.0f}%
-    - 호가: 저항[{asks_str}] vs 지지[{bids_str}]
 
-    [글로벌 파생상품 데이터 (Hybrid Source)]
-    - 글로벌 시세(CoinGecko): ${global_price:.4f}
-    - **미체결 약정(OI)**: {m_oi:.1f}M XRP (사용자 입력값)
-    - **펀딩비(Funding Rate)**: {m_funding:.4f}% (사용자 입력값, 양수=롱우세/음수=숏우세)
-    * 주의: OI와 펀딩비가 0일 경우, 데이터가 입력되지 않은 것이므로 '확인 필요'로 간주하고 보수적으로 분석하시오.
+    [⭐⭐ 핵심 수급 데이터 (OI 대체 지표)]
+    1. 고래 활동 (1억 이상 체결): {whale_str} -> (세력이 매수 중인지 매도 중인지 판단 핵심)
+    2. 순체결량 (Net Flow): {flow_str} -> (현재 시장가로 긁는 주체들의 방향성)
+    3. 유동성 공급자 (LP) 포지션: 호가 잔량 비율 {micro_data['ob_ratio']:.0f}% ({ob_status})
+       - 주요 저항벽: {asks_str}
+       - 주요 지지벽: {bids_str}
 
     [사용자 포지션]
     - {user_context}
 
     4. 출력 지시 (Output Instruction)
     
-    ### 1. 🔍 세력 의도 및 시황 분석
-    (글로벌 시세와 OI/펀딩비(입력된 경우)를 고려하여 시장의 과열/공포 상태와 세력의 포지션을 분석)
+    ### 1. 🔍 세력 의도 및 수급 분석
+    (고래 체결 빈도와 순체결량을 기반으로, 현재 스마트 머니가 물량을 모으고 있는지(매집) 던지고 있는지(분산) 분석)
 
     ### 2. 🛡️ 주요 지지 및 저항 라인
     - 강력 저항(뚫기 힘든 곳): OOO원
     - 강력 지지(받아줄 곳): OOO원
 
     ### 3. ♟️ 실전 매매 전략 (결론)
-    - **추천 포지션**: (강력 홀딩 / 눌림목 매수 / 숏 헤징 / 관망 등)
+    - **추천 포지션**: (강력 홀딩 / 눌림목 매수 / 비중 축소 / 관망)
     - **대응 가이드**: (평단가 보유자 및 신규 진입자별 구체적 행동 지침)
     - **스탑로스**: (ATR 기반 구체적 가격)
 
     5. 전문가적 촉구 (Final Nudge)
-    "제공된 모든 데이터를 종합하여 가장 확률 높은 시나리오를 제시하십시오."
+    "선물 지표 없이도 현물 체결 강도와 고래의 움직임만으로 시장의 방향성을 날카롭게 꿰뚫어 보십시오."
     """
 
 # ---------------------------------------------------------
@@ -262,12 +260,11 @@ def get_detailed_trend_summary(trends):
 # 메인 실행 로직
 # ---------------------------------------------------------
 try:
+    # 데이터 수집 (Upbit Only)
     df, df_trend, orderbook, trades = get_all_data()
     
-    # [NEW] CoinGecko 글로벌 시세 (차단 안됨)
-    global_price = get_global_price_coingecko()
-    
-    net_vol, buy_ratio, large_trades = analyze_trade_flow(trades, df.iloc[-1]['close'])
+    # [NEW] 현물 미세 수급 분석
+    micro_data = analyze_market_microstructure(trades, orderbook)
     
     curr = df.iloc[-1]
     curr_price = float(curr['close'])
@@ -284,9 +281,6 @@ try:
             trends[h] = {'price': 0, 'change': 0.0}
 
     major_asks, major_bids = get_major_walls(orderbook)
-    bids = sum([x[1] for x in orderbook['bids']])
-    asks = sum([x[1] for x in orderbook['asks']])
-    ratio = (bids / asks * 100) if asks > 0 else 0
     kst_now_str = get_kst_now().strftime('%H:%M:%S')
 
     # -----------------------------------------------------
@@ -303,17 +297,19 @@ try:
     st.divider()
 
     # -----------------------------------------------------
-    # [섹션 2] 단타 데이터 & 글로벌 데이터
+    # [섹션 2] 단타 데이터 & 수급 분석 (대체 데이터)
     # -----------------------------------------------------
-    st.markdown(f"### 🎯 실시간 타점 & 글로벌 데이터 (기준: {kst_now_str})")
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("현재가 (Upbit)", f"{curr_price:,.0f}원")
-    k2.metric("글로벌 (CoinGecko)", f"${global_price:.4f}")
-    k3.metric("미체결약정 (Input)", f"{manual_oi}M")
-    k4.metric("펀딩비 (Input)", f"{manual_funding}%")
-    k5.metric("순체결량 (Upbit)", f"{net_vol:,.0f} XRP")
+    st.markdown(f"### 🎯 실시간 타점 & 수급 데이터 (기준: {kst_now_str})")
     
-    st.caption("※ OI와 펀딩비는 사이드바에서 수동 입력하면 분석에 반영됩니다.")
+    # 0으로 나오는 선물 데이터 대신, 살아있는 현물 데이터 표시
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("현재가", f"{curr_price:,.0f}원")
+    k2.metric("고래 체결 (1억↑)", f"매수 {micro_data['whale_buy']} / 매도 {micro_data['whale_sell']}")
+    k3.metric("순체결량 (Net)", f"{micro_data['net_vol']:,.0f} XRP", "양수=매수우위")
+    k4.metric("호가 잔량비", f"{micro_data['ob_ratio']:.0f}%", "100↑ 매수벽 우위")
+    k5.metric("ATR (변동성)", f"{curr['atr']:.0f}원")
+    
+    st.caption("※ 고래 체결: 최근 체결 200건 중 1억원 이상 대량 주문 발생 횟수")
     st.divider()
 
     # -----------------------------------------------------
@@ -344,8 +340,8 @@ try:
     else:
         st.info("📌 **신규 진입** 관점에서 전략을 생성합니다.")
 
-    # 공통 프롬프트 준비 (수동 데이터 포함)
-    prompt_text = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price, (net_vol, buy_ratio, large_trades), global_price, (manual_oi, manual_funding))
+    # 공통 프롬프트 준비 (대체 데이터 포함)
+    prompt_text = make_prompt(df, trends, (major_asks, major_bids), my_avg_price, micro_data)
 
     # 3개의 컬럼 (Flash / Lite / Prompt Gen)
     mb1, mb2, mb3 = st.columns(3)
