@@ -11,7 +11,7 @@ import google.generativeai as genai
 # [설정] 페이지 기본 설정
 # ---------------------------------------------------------
 st.set_page_config(page_title="XRP Pro Trader", layout="wide")
-st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.6 - Binance OI Added)")
+st.title("🤖 XRP 통합 트레이딩 센터 (Ver 2.5 - Bybit Futures)")
 
 # ---------------------------------------------------------
 # [보안] 구글 API 키 로드
@@ -37,7 +37,7 @@ if 'report_time' not in st.session_state: st.session_state['report_time'] = None
 if 'report_model' not in st.session_state: st.session_state['report_model'] = ""
 if 'generated_prompt' not in st.session_state: st.session_state['generated_prompt'] = ""
 
-# 카운터 초기화 (Gemini 2개만 유지)
+# 카운터 초기화
 if 'cnt_model_25' not in st.session_state: st.session_state['cnt_model_25'] = 0
 if 'cnt_model_25_lite' not in st.session_state: st.session_state['cnt_model_25_lite'] = 0
 
@@ -83,18 +83,18 @@ if st.sidebar.button("강제 초기화"):
     st.rerun()
 
 # ---------------------------------------------------------
-# [API 연결] 업비트(Key 필요없음) & 바이낸스(Key 필요없음)
+# [API 연결] 업비트 & 바이비트(Bybit) - 키 불필요
 # ---------------------------------------------------------
 exchange = ccxt.upbit()
-# 바이낸스 선물(Futures) 시장 연결 (키 없이 공용 데이터 조회)
-binance = ccxt.binance({
+# 바이비트 선물(Linear) 연결 (미국 IP 차단 우회용)
+bybit = ccxt.bybit({
     'options': {
         'defaultType': 'future' 
     }
 })
 
 # ---------------------------------------------------------
-# [함수] 데이터 수집 (Binance Data 추가)
+# [함수] 데이터 수집
 # ---------------------------------------------------------
 def get_all_data():
     # 1. 업비트 기본 OHLCV
@@ -128,22 +128,27 @@ def get_all_data():
         
     return df, df_trend, orderbook, trades
 
-# [NEW] 바이낸스 선물 데이터 가져오기 (OI, Funding Rate)
-def get_binance_futures_data():
+# [NEW] 바이비트 선물 데이터 가져오기 (Bybit Linear)
+def get_bybit_futures_data():
     try:
-        # 미체결 약정 (Open Interest) - XRP/USDT
-        ticker = binance.fetch_ticker("XRP/USDT")
-        oi_data = binance.fetch_open_interest("XRP/USDT")
-        funding_data = binance.fetch_funding_rate("XRP/USDT")
+        symbol = "XRP/USDT:USDT" # Bybit Linear Symbol
         
-        # 데이터 정리
-        global_price = ticker['last'] # 달러 가격
-        open_interest = oi_data['openInterestAmount'] # 계약 수
-        funding_rate = funding_data['fundingRate'] * 100 # %로 변환
+        # 1. 현재가
+        ticker = bybit.fetch_ticker(symbol)
+        global_price = ticker['last']
+        
+        # 2. 미체결 약정 (OI)
+        oi_data = bybit.fetch_open_interest(symbol)
+        # Bybit는 openInterestAmount가 기본
+        open_interest = oi_data['openInterestAmount'] 
+        
+        # 3. 펀딩비
+        funding_data = bybit.fetch_funding_rate(symbol)
+        funding_rate = funding_data['fundingRate'] * 100
         
         return global_price, open_interest, funding_rate
     except Exception as e:
-        # 에러나면 0으로 처리 (프로그램 멈춤 방지)
+        # 에러 시 0 반환 (멈춤 방지)
         return 0, 0, 0
 
 def get_major_walls(orderbook):
@@ -173,9 +178,9 @@ def analyze_trade_flow(trades, current_price):
     return net_vol, buy_ratio, large_trades
 
 # ---------------------------------------------------------
-# [함수] 프롬프트 생성기 (바이낸스 데이터 통합)
+# [함수] 프롬프트 생성기 (바이비트 데이터 통합)
 # ---------------------------------------------------------
-def make_prompt(df, trends, ratio, walls, my_price, trades_data, binance_data):
+def make_prompt(df, trends, ratio, walls, my_price, trades_data, bybit_data):
     curr = df.iloc[-1]
     last = df.iloc[-2]
     curr_price = curr['close']
@@ -183,11 +188,8 @@ def make_prompt(df, trends, ratio, walls, my_price, trades_data, binance_data):
     major_asks, major_bids = walls
     net_vol, buy_ratio, large_trades = trades_data
     
-    # [NEW] 바이낸스 데이터 해체
-    bn_price, bn_oi, bn_funding = binance_data
-    
-    # 김치 프리미엄 대략 계산 (환율 1450원 가정 - 실제 API 연동은 복잡하므로 고정값 사용하거나 추후 보완)
-    # 여기서는 "글로벌 가격(달러)"만 제공하여 AI가 판단하게 함
+    # [NEW] 바이비트 데이터
+    bb_price, bb_oi, bb_funding = bybit_data
     
     asks_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_asks])
     bids_str = ", ".join([f"{p:,.0f}원({v:,.0f}개)" for p, v in major_bids])
@@ -214,10 +216,10 @@ def make_prompt(df, trends, ratio, walls, my_price, trades_data, binance_data):
     - 수급: 순체결량 {net_vol:,.0f} / 매수강도 {buy_ratio:.1f}% / 매수벽 강도 {ratio:.0f}%
     - 호가: 저항[{asks_str}] vs 지지[{bids_str}]
 
-    [글로벌 파생상품 데이터 - XRP/USDT(Binance Futures)]
-    - 글로벌 시세: ${bn_price:.4f} (김치프리미엄 고려 필요)
-    - **미체결 약정(OI)**: {bn_oi:,.0f} XRP (이 수치의 증감 추세는 직접적인 데이터가 없으므로, 가격 변동과 결합해 해석하시오. 예: 가격상승+OI증가=강세)
-    - **펀딩비(Funding Rate)**: {bn_funding:.4f}% (양수=롱우세/음수=숏우세)
+    [글로벌 파생상품 데이터 - XRP/USDT(Bybit Futures)]
+    - 글로벌 시세: ${bb_price:.4f}
+    - **미체결 약정(OI)**: {bb_oi:,.0f} XRP (이 수치의 증감 추세는 직접적인 데이터가 없으므로, 가격 변동과 결합해 해석하시오. 예: 가격상승+OI증가=강세)
+    - **펀딩비(Funding Rate)**: {bb_funding:.4f}% (양수=롱우세/음수=숏우세)
 
     [사용자 포지션]
     - {user_context}
@@ -225,7 +227,7 @@ def make_prompt(df, trends, ratio, walls, my_price, trades_data, binance_data):
     4. 출력 지시 (Output Instruction)
     
     ### 1. 🔍 세력 의도 및 시황 분석
-    (Binance 펀딩비와 OI 데이터를 포함하여, 현재 시장이 과열인지 공포인지, 세력이 롱/숏 중 어디에 베팅하는지 분석)
+    (Bybit 펀딩비와 OI 데이터를 포함하여, 현재 시장이 과열인지 공포인지, 세력이 롱/숏 중 어디에 베팅하는지 분석)
 
     ### 2. 🛡️ 주요 지지 및 저항 라인
     - 강력 저항(뚫기 힘든 곳): OOO원
@@ -275,9 +277,9 @@ def get_detailed_trend_summary(trends):
 # 메인 실행 로직
 # ---------------------------------------------------------
 try:
-    # 데이터 수집 (Binance 포함)
+    # 데이터 수집 (Bybit Futures 포함)
     df, df_trend, orderbook, trades = get_all_data()
-    bn_price, bn_oi, bn_funding = get_binance_futures_data() # [NEW]
+    bb_price, bb_oi, bb_funding = get_bybit_futures_data() # [NEW]
     net_vol, buy_ratio, large_trades = analyze_trade_flow(trades, df.iloc[-1]['close'])
     
     curr = df.iloc[-1]
@@ -314,17 +316,17 @@ try:
     st.divider()
 
     # -----------------------------------------------------
-    # [섹션 2] 단타 데이터 & 바이낸스 지표
+    # [섹션 2] 단타 데이터 & Bybit 지표
     # -----------------------------------------------------
     st.markdown(f"### 🎯 실시간 타점 & 파생상품 데이터 (기준: {kst_now_str})")
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("현재가 (Upbit)", f"{curr_price:,.0f}원")
-    k2.metric("글로벌 (Binance)", f"${bn_price:.4f}")
-    k3.metric("미체결약정 (OI)", f"{bn_oi/1000000:.1f}M XRP")
-    k4.metric("펀딩비 (Funding)", f"{bn_funding:.4f}%")
+    k2.metric("글로벌 (Bybit)", f"${bb_price:.4f}")
+    k3.metric("미체결약정 (OI)", f"{bb_oi/1000000:.1f}M XRP")
+    k4.metric("펀딩비 (Funding)", f"{bb_funding:.4f}%")
     k5.metric("순체결량 (Upbit)", f"{net_vol:,.0f} XRP")
     
-    st.caption("※ 펀딩비 양수(+) = 롱 우세(상승심리), 음수(-) = 숏 우세(하락심리)")
+    st.caption("※ Bybit 선물의 OI 및 펀딩비 데이터를 실시간으로 반영합니다.")
     st.divider()
 
     # -----------------------------------------------------
@@ -348,15 +350,15 @@ try:
     # -----------------------------------------------------
     st.divider()
     st.markdown("### 🧠 AI 전략 분석 & 프롬프트 생성")
-    st.caption("※ 바이낸스 선물 데이터(OI, Funding)가 포함된 심층 분석입니다.")
+    st.caption("※ API 호출 비용이 부담된다면, **'프롬프트 생성'**을 눌러 복사한 뒤 무료 AI에게 물어보세요.")
 
     if my_avg_price > 0:
         st.success(f"📌 **평단가 {my_avg_price:,.0f}원** 기준 맞춤 전략을 생성합니다.")
     else:
         st.info("📌 **신규 진입** 관점에서 전략을 생성합니다.")
 
-    # 공통 프롬프트 준비 (바이낸스 데이터 포함)
-    prompt_text = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price, (net_vol, buy_ratio, large_trades), (bn_price, bn_oi, bn_funding))
+    # 공통 프롬프트 준비 (Bybit 데이터 포함)
+    prompt_text = make_prompt(df, trends, ratio, (major_asks, major_bids), my_avg_price, (net_vol, buy_ratio, large_trades), (bb_price, bb_oi, bb_funding))
 
     # 3개의 컬럼 (Flash / Lite / Prompt Gen)
     mb1, mb2, mb3 = st.columns(3)
